@@ -22,7 +22,7 @@ fn main() -> Result<(), Error> {
 
     // Initialize logging with specified level or default to Info
     if args.len() > 2 {
-        if let Some(log_level) = LogLevel::from_str(&args[2]) {
+        if let Some(log_level) = args[2].parse::<LogLevel>().ok() {
             init_default_logger();
             set_log_level(log_level);
             log_info(&format!(

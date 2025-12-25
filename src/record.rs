@@ -177,8 +177,8 @@ pub fn parse_value(serial_type: i64, data: &[u8]) -> Result<(Value, usize)> {
             }
             let value = (i64::from(data[0]) << 16) | (i64::from(data[1]) << 8) | i64::from(data[2]);
             // Sign extend from 24-bit
-            let value = if value & 0x800000 != 0 {
-                value | 0xffffffffff000000u64 as i64
+            let value = if value & 0x80_0000 != 0 {
+                value | 0xffff_ffff_ff00_0000_u64 as i64
             } else {
                 value
             };
@@ -201,8 +201,8 @@ pub fn parse_value(serial_type: i64, data: &[u8]) -> Result<(Value, usize)> {
                 | (i64::from(data[4]) << 8)
                 | i64::from(data[5]);
             // Sign extend from 48-bit
-            let value = if value & 0x800000000000 != 0 {
-                value | 0xffff000000000000u64 as i64
+            let value = if value & 0x8000_0000_0000 != 0 {
+                value | 0xffff_0000_0000_0000_u64 as i64
             } else {
                 value
             };

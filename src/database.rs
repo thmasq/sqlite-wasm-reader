@@ -22,6 +22,10 @@ use crate::{
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use alloc::{format, string::String, vec::Vec};
 
+const MAX_ROWS: usize = 1_000_000;
+const MAX_ITERATIONS: usize = 10_000_000;
+const BATCH_SIZE: usize = 1000;
+
 /// A row of data from a table
 pub type Row = HashMap<String, Value>;
 
@@ -53,7 +57,7 @@ impl Database {
             return Err(Error::InvalidFormat("Not a SQLite database".into()));
         }
 
-        let header = Self::parse_header(&header_bytes)?;
+        let header = Self::parse_header(&header_bytes);
         let page_size = header.page_size as usize;
         let max_cache_size = 5000;
 
@@ -219,7 +223,7 @@ impl Database {
     }
 
     /// Parse the file header
-    fn parse_header(data: &[u8]) -> Result<FileHeader> {
+    fn parse_header(data: &[u8]) -> FileHeader {
         let page_size = BigEndian::read_u16(&data[16..18]);
         let page_size = if page_size == 1 {
             65536u32
@@ -227,7 +231,7 @@ impl Database {
             u32::from(page_size)
         };
 
-        Ok(FileHeader {
+        FileHeader {
             page_size,
             write_version: data[18],
             read_version: data[19],
@@ -249,7 +253,7 @@ impl Database {
             application_id: BigEndian::read_u32(&data[68..72]),
             version_valid_for: BigEndian::read_u32(&data[72..92]),
             sqlite_version: BigEndian::read_u32(&data[96..100]),
-        })
+        }
     }
 
     /// Read a page with optimized caching for sequential access patterns
@@ -514,8 +518,6 @@ impl Database {
                 }
                 Err(e) => {
                     log_warn(&format!("Failed to parse row {row_count}: {e}"));
-                    // Continue with next row instead of failing
-                    continue;
                 }
             }
         }
@@ -579,11 +581,10 @@ impl Database {
         let mut cursor = BTreeCursor::new(root_page);
 
         // Pre-allocate with estimated capacity to reduce reallocations
-        let estimated_rows = limit.unwrap_or(10000).min(100000);
+        let estimated_rows = limit.unwrap_or(10000).min(100_000);
         let mut rows = Vec::with_capacity(estimated_rows);
 
         // Batch processing parameters
-        const BATCH_SIZE: usize = 1000;
         let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
 
         // Safety check: limit number of rows to prevent excessive memory usage
@@ -639,8 +640,6 @@ impl Database {
                 }
                 Err(e) => {
                     log_warn(&format!("Failed to parse row {row_count}: {e}"));
-                    // Continue with next row instead of failing
-                    continue;
                 }
             }
         }
@@ -726,7 +725,7 @@ impl Database {
                 "Using index acceleration for query on table {table_name}"
             ));
             // Index lookup succeeded - apply remaining operations
-            return self.apply_query_operations(index_rows, query);
+            return Ok(Self::apply_query_operations(index_rows, query));
         }
 
         // Fall back to table scan
@@ -745,7 +744,7 @@ impl Database {
         };
 
         // Apply query operations (WHERE, ORDER BY, LIMIT)
-        self.apply_query_operations(rows, query)
+        Ok(Self::apply_query_operations(rows, query))
     }
 
     /// Try to use index lookup for the query, returning Some(rows) if successful, None if no suitable index
@@ -869,7 +868,7 @@ impl Database {
     }
 
     /// Apply query operations (WHERE, ORDER BY, LIMIT) to a set of rows
-    fn apply_query_operations(&self, mut rows: Vec<Row>, query: &SelectQuery) -> Result<Vec<Row>> {
+    fn apply_query_operations(mut rows: Vec<Row>, query: &SelectQuery) -> Vec<Row> {
         // Apply WHERE clause
         if let Some(where_expr) = &query.where_expr {
             rows.retain(|row| {
@@ -919,7 +918,7 @@ impl Database {
             }
         }
 
-        Ok(rows)
+        rows
     }
 
     /// High-performance table scan that minimizes allocations
@@ -960,10 +959,6 @@ impl Database {
         let root_page = self.read_page(root_page_num)?;
         let mut cursor = BTreeCursor::new(root_page);
         let mut count = 0;
-
-        // Safety limits
-        const MAX_ROWS: usize = 1_000_000;
-        const MAX_ITERATIONS: usize = 10_000_000;
 
         let row_limit = limit.unwrap_or(MAX_ROWS).min(MAX_ROWS);
 
@@ -1083,13 +1078,6 @@ fn collect_and_conditions<'b>(expr: &'b Expr, conditions: &mut HashMap<String, &
             collect_and_conditions(left, conditions);
             collect_and_conditions(right, conditions);
         }
-        Expr::Or(_, _) => {
-            // For OR expressions, we need to handle them at a higher level
-            // Just skip them for now and let the caller handle them
-        }
-        Expr::Not(_) => {
-            // Skip NOT expressions for now
-        }
         Expr::Comparison {
             column,
             operator,
@@ -1101,17 +1089,14 @@ fn collect_and_conditions<'b>(expr: &'b Expr, conditions: &mut HashMap<String, &
                 // Skip non-equality conditions
             }
         }
-        Expr::IsNull(_) => {
-            // Skip IS NULL conditions
-        }
-        Expr::IsNotNull(_) => {
-            // Skip IS NOT NULL conditions
-        }
-        Expr::In { .. } => {
-            // Skip IN conditions
-        }
-        Expr::Between { .. } => {
-            // Skip BETWEEN conditions for now (they're not equality conditions)
+        // Merge all expressions that should be skipped/ignored for index lookup
+        Expr::Or(_, _)
+        | Expr::Not(_)
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::In { .. }
+        | Expr::Between { .. } => {
+            // These conditions are handled at a higher level or ignored for index lookup
         }
     }
 }

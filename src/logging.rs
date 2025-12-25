@@ -1,5 +1,6 @@
 //! Logging functionality for `sqlite_wasm_reader`
 
+use std::str::FromStr;
 use std::sync::Mutex;
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
@@ -25,17 +26,19 @@ impl LogLevel {
     pub const fn default() -> Self {
         Self::Info
     }
+}
 
-    /// Parse log level from string
-    #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "error" => Some(Self::Error),
-            "warn" | "warning" => Some(Self::Warn),
-            "info" => Some(Self::Info),
-            "debug" => Some(Self::Debug),
-            "trace" => Some(Self::Trace),
-            _ => None,
+            "error" => Ok(Self::Error),
+            "warn" | "warning" => Ok(Self::Warn),
+            "info" => Ok(Self::Info),
+            "debug" => Ok(Self::Debug),
+            "trace" => Ok(Self::Trace),
+            _ => Err(format!("Invalid log level: {s}")),
         }
     }
 }
@@ -191,20 +194,20 @@ mod tests {
 
     #[test]
     fn test_log_level_from_str() {
-        assert_eq!(LogLevel::from_str("error"), Some(LogLevel::Error));
-        assert_eq!(LogLevel::from_str("warn"), Some(LogLevel::Warn));
-        assert_eq!(LogLevel::from_str("warning"), Some(LogLevel::Warn));
-        assert_eq!(LogLevel::from_str("info"), Some(LogLevel::Info));
-        assert_eq!(LogLevel::from_str("debug"), Some(LogLevel::Debug));
-        assert_eq!(LogLevel::from_str("trace"), Some(LogLevel::Trace));
+        assert_eq!(LogLevel::from_str("error"), Ok(LogLevel::Error));
+        assert_eq!(LogLevel::from_str("warn"), Ok(LogLevel::Warn));
+        assert_eq!(LogLevel::from_str("warning"), Ok(LogLevel::Warn));
+        assert_eq!(LogLevel::from_str("info"), Ok(LogLevel::Info));
+        assert_eq!(LogLevel::from_str("debug"), Ok(LogLevel::Debug));
+        assert_eq!(LogLevel::from_str("trace"), Ok(LogLevel::Trace));
 
         // Case insensitive
-        assert_eq!(LogLevel::from_str("ERROR"), Some(LogLevel::Error));
-        assert_eq!(LogLevel::from_str("Debug"), Some(LogLevel::Debug));
+        assert_eq!(LogLevel::from_str("ERROR"), Ok(LogLevel::Error));
+        assert_eq!(LogLevel::from_str("Debug"), Ok(LogLevel::Debug));
 
         // Invalid values
-        assert_eq!(LogLevel::from_str("invalid"), None);
-        assert_eq!(LogLevel::from_str(""), None);
+        assert!(LogLevel::from_str("invalid").is_err());
+        assert!(LogLevel::from_str("").is_err());
     }
 
     #[test]

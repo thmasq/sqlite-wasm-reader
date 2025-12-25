@@ -183,7 +183,7 @@ impl Expr {
 
     /// Logical NOT: `NOT self`
     #[must_use]
-    pub fn not(self) -> Self {
+    pub fn logical_not(self) -> Self {
         Self::Not(Box::new(self))
     }
 }
@@ -319,75 +319,86 @@ impl SelectQuery {
                 expr,
                 pattern,
                 ..
-            } => {
-                if *negated {
-                    return Err(Error::QueryError("NOT LIKE is not supported".to_string()));
-                }
-                if let (SqlExpr::Identifier(ident), value_expr) = (&**expr, &**pattern) {
-                    let value = Self::parse_sql_value(value_expr)?;
-                    Ok(Expr::Comparison {
-                        column: ident.value.clone(),
-                        operator: ComparisonOperator::Like,
-                        value,
-                    })
-                } else {
-                    Err(Error::QueryError(
-                        "Expected column LIKE 'pattern'".to_string(),
-                    ))
-                }
-            }
+            } => Self::parse_like_expr(*negated, expr, pattern),
             SqlExpr::InList {
                 expr,
                 list,
                 negated,
-            } => {
-                if *negated {
-                    return Err(Error::QueryError("NOT IN is not supported".to_string()));
-                }
-                if let SqlExpr::Identifier(ident) = &**expr {
-                    let mut values = Vec::new();
-                    for item in list {
-                        values.push(Self::parse_sql_value(item)?);
-                    }
-                    Ok(Expr::In {
-                        column: ident.value.clone(),
-                        values,
-                    })
-                } else {
-                    Err(Error::QueryError(
-                        "Expected column name before IN".to_string(),
-                    ))
-                }
-            }
+            } => Self::parse_in_list_expr(expr, list, *negated),
             SqlExpr::Between {
                 expr,
                 negated,
                 low,
                 high,
-            } => {
-                if *negated {
-                    return Err(Error::QueryError(
-                        "NOT BETWEEN is not supported".to_string(),
-                    ));
-                }
-                if let SqlExpr::Identifier(ident) = &**expr {
-                    let low_value = Self::parse_sql_value(low)?;
-                    let high_value = Self::parse_sql_value(high)?;
-                    Ok(Expr::Between {
-                        column: ident.value.clone(),
-                        low: low_value,
-                        high: high_value,
-                    })
-                } else {
-                    Err(Error::QueryError(
-                        "Expected column name before BETWEEN".to_string(),
-                    ))
-                }
-            }
+            } => Self::parse_between_expr(expr, *negated, low, high),
             SqlExpr::Nested(expr) => Self::parse_where_expr(expr),
             _ => Err(Error::QueryError(format!(
                 "Unsupported expression: {expr:?}"
             ))),
+        }
+    }
+
+    fn parse_like_expr(negated: bool, expr: &SqlExpr, pattern: &SqlExpr) -> Result<Expr> {
+        if negated {
+            return Err(Error::QueryError("NOT LIKE is not supported".to_string()));
+        }
+        if let (SqlExpr::Identifier(ident), value_expr) = (expr, pattern) {
+            let value = Self::parse_sql_value(value_expr)?;
+            Ok(Expr::Comparison {
+                column: ident.value.clone(),
+                operator: ComparisonOperator::Like,
+                value,
+            })
+        } else {
+            Err(Error::QueryError(
+                "Expected column LIKE 'pattern'".to_string(),
+            ))
+        }
+    }
+
+    fn parse_in_list_expr(expr: &SqlExpr, list: &[SqlExpr], negated: bool) -> Result<Expr> {
+        if negated {
+            return Err(Error::QueryError("NOT IN is not supported".to_string()));
+        }
+        if let SqlExpr::Identifier(ident) = expr {
+            let mut values = Vec::new();
+            for item in list {
+                values.push(Self::parse_sql_value(item)?);
+            }
+            Ok(Expr::In {
+                column: ident.value.clone(),
+                values,
+            })
+        } else {
+            Err(Error::QueryError(
+                "Expected column name before IN".to_string(),
+            ))
+        }
+    }
+
+    fn parse_between_expr(
+        expr: &SqlExpr,
+        negated: bool,
+        low: &SqlExpr,
+        high: &SqlExpr,
+    ) -> Result<Expr> {
+        if negated {
+            return Err(Error::QueryError(
+                "NOT BETWEEN is not supported".to_string(),
+            ));
+        }
+        if let SqlExpr::Identifier(ident) = expr {
+            let low_value = Self::parse_sql_value(low)?;
+            let high_value = Self::parse_sql_value(high)?;
+            Ok(Expr::Between {
+                column: ident.value.clone(),
+                low: low_value,
+                high: high_value,
+            })
+        } else {
+            Err(Error::QueryError(
+                "Expected column name before BETWEEN".to_string(),
+            ))
         }
     }
 
@@ -462,8 +473,9 @@ impl SelectQuery {
                             .map_err(|_| Error::QueryError("Invalid integer value".to_string()))
                     }
                 }
-                SqlValue::SingleQuotedString(s) => Ok(Value::Text(s.clone())),
-                SqlValue::DoubleQuotedString(s) => Ok(Value::Text(s.clone())),
+                SqlValue::SingleQuotedString(s) | SqlValue::DoubleQuotedString(s) => {
+                    Ok(Value::Text(s.clone()))
+                }
                 SqlValue::Null => Ok(Value::Null),
                 _ => Err(Error::QueryError("Unsupported value type".to_string())),
             },

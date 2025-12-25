@@ -71,9 +71,8 @@ impl BTreeCursor {
         let mut current_page = read_page(root_page_num)?;
 
         loop {
+            let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
             if current_page.page_type.is_leaf() {
-                let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
-
                 // Binary search for the key in this leaf page
                 let mut low = 0;
                 let mut high = cell_pointers.len();
@@ -93,26 +92,26 @@ impl BTreeCursor {
 
                 // Key not found
                 return Ok(None);
-            } else {
-                // This is an interior page, find the appropriate child page to descend to.
-                let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
-
-                let mut next_page_num = current_page.right_pointer.ok_or_else(|| {
-                    Error::InvalidFormat("Interior page missing right pointer".into())
-                })?;
-
-                for &cell_offset in &cell_pointers {
-                    let cell_data = current_page.cell_content(cell_offset)?;
-                    let cell = parse_interior_table_cell(cell_data)?;
-                    if key <= cell.key {
-                        next_page_num = cell.left_child.unwrap();
-                        break;
-                    }
-                }
-
-                // Descend to the child page.
-                current_page = read_page(next_page_num)?;
             }
+
+            // This is an interior page, find the appropriate child page to descend to.
+            let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
+
+            let mut next_page_num = current_page.right_pointer.ok_or_else(|| {
+                Error::InvalidFormat("Interior page missing right pointer".into())
+            })?;
+
+            for &cell_offset in &cell_pointers {
+                let cell_data = current_page.cell_content(cell_offset)?;
+                let cell = parse_interior_table_cell(cell_data)?;
+                if key <= cell.key {
+                    next_page_num = cell.left_child.unwrap();
+                    break;
+                }
+            }
+
+            // Descend to the child page.
+            current_page = read_page(next_page_num)?;
         }
     }
 
@@ -134,164 +133,181 @@ impl BTreeCursor {
                 return Ok(None);
             }
 
-            let (page, cell_index) = self.page_stack.last_mut().unwrap();
+            // Check if leaf or interior without holding mutable borrow too long
+            let is_leaf = self.page_stack.last().unwrap().0.page_type.is_leaf();
 
-            // If this is a leaf page
-            if page.page_type.is_leaf() {
-                // If we've processed all cells in this leaf page
-                if *cell_index >= page.cell_count as usize {
-                    // Pop this page and continue with parent
-                    self.page_stack.pop();
-                    continue;
+            if is_leaf {
+                if let Some(cell) = self.process_leaf_page() {
+                    return Ok(Some(cell));
                 }
-
-                // Get the current cell from leaf page
-                let is_first_page = page.page_number == 1;
-                let cell_pointers = match page.cell_pointers(is_first_page) {
-                    Ok(pointers) => pointers,
-                    Err(e) => {
-                        log_warn(&format!(
-                            "Failed to get cell pointers for page {}: {}",
-                            page.page_number, e
-                        ));
-                        // Skip this page and continue with parent
-                        self.page_stack.pop();
-                        continue;
-                    }
-                };
-
-                if *cell_index >= cell_pointers.len() {
-                    // Pop this page and continue with parent
-                    self.page_stack.pop();
-                    continue;
-                }
-
-                let cell_offset = cell_pointers[*cell_index];
-                let cell_data = match page.cell_content(cell_offset) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        log_warn(&format!(
-                            "Failed to get cell content at offset {} on page {}: {}",
-                            cell_offset, page.page_number, e
-                        ));
-                        // Skip this cell and move to next
-                        *cell_index += 1;
-                        continue;
-                    }
-                };
-
-                // Move to next cell in current page
-                *cell_index += 1;
-
-                // Parse and return the leaf cell
-                let cell = match parse_leaf_table_cell(cell_data) {
-                    Ok(cell) => cell,
-                    Err(e) => {
-                        log_debug(&format!(
-                            "Failed to parse leaf cell on page {}: {}",
-                            page.page_number, e
-                        ));
-                        // Skip this cell and continue to next iteration
-                        continue;
-                    }
-                };
-                return Ok(Some(cell));
+            } else {
+                self.process_interior_page(&mut read_page);
             }
+        }
+    }
 
-            // This is an interior page
-            if *cell_index >= page.cell_count as usize {
-                // We've processed all cells in this interior page
-                // Follow the right-most pointer if it exists
-                if let Some(right_ptr) = page.right_pointer {
-                    // Safety check: prevent revisiting the same page
-                    if self.visited_pages.contains(&right_ptr) {
-                        // We're about to revisit a page, this indicates a cycle
-                        // Pop this page and continue with parent instead
-                        self.page_stack.pop();
-                        continue;
-                    }
+    /// Process the current leaf page on the stack.
+    /// Returns `Ok(Some(cell))` if a cell was found.
+    /// Returns `Ok(None)` if the loop should continue (e.g. page finished or error skipped).
+    fn process_leaf_page(&mut self) -> Option<Cell> {
+        let (page, cell_index) = self.page_stack.last_mut().unwrap();
 
-                    let right_page = read_page(right_ptr)?;
-                    self.visited_pages.push(right_ptr);
-                    self.page_stack.push((right_page, 0));
-                    continue;
-                }
+        // If we've processed all cells in this leaf page
+        if *cell_index >= page.cell_count as usize {
+            // Pop this page and continue with parent
+            self.page_stack.pop();
+            return None;
+        }
 
-                // No right pointer, pop this page and continue with parent
+        let is_first_page = page.page_number == 1;
+        let cell_pointers = match page.cell_pointers(is_first_page) {
+            Ok(pointers) => pointers,
+            Err(e) => {
+                log_warn(&format!(
+                    "Failed to get cell pointers for page {}: {}",
+                    page.page_number, e
+                ));
+                // Skip this page and continue with parent
                 self.page_stack.pop();
-                continue;
+                return None;
             }
+        };
 
-            // Process the current cell in the interior page
+        if *cell_index >= cell_pointers.len() {
+            // Pop this page and continue with parent
+            self.page_stack.pop();
+            return None;
+        }
+
+        let cell_offset = cell_pointers[*cell_index];
+        // Clone data to satisfy borrow checker when we increment index later
+        let cell_data = match page.cell_content(cell_offset) {
+            Ok(data) => data.to_vec(),
+            Err(e) => {
+                log_warn(&format!(
+                    "Failed to get cell content at offset {} on page {}: {}",
+                    cell_offset, page.page_number, e
+                ));
+                // Skip this cell and move to next
+                *cell_index += 1;
+                return None;
+            }
+        };
+
+        // Move to next cell in current page
+        *cell_index += 1;
+
+        // Parse and return the leaf cell
+        match parse_leaf_table_cell(&cell_data) {
+            Ok(cell) => Some(cell),
+            Err(e) => {
+                log_debug(&format!(
+                    "Failed to parse leaf cell on page {}: {}",
+                    page.page_number, e
+                ));
+                // Skip this cell and continue to next iteration
+                None
+            }
+        }
+    }
+
+    /// Process the current interior page on the stack.
+    fn process_interior_page<F>(&mut self, mut read_page: F)
+    where
+        F: FnMut(u32) -> Result<Page>,
+    {
+        // Check if we are done with cells in this page
+        let (is_done, right_ptr) = {
+            let (page, cell_index) = self.page_stack.last_mut().unwrap();
+            (*cell_index >= page.cell_count as usize, page.right_pointer)
+        };
+
+        if is_done {
+            // We've processed all cells in this interior page
+            if let Some(right_ptr) = right_ptr {
+                // Safety check: prevent revisiting the same page
+                if self.visited_pages.contains(&right_ptr) {
+                    self.page_stack.pop();
+                } else {
+                    match read_page(right_ptr) {
+                        Ok(right_page) => {
+                            self.visited_pages.push(right_ptr);
+                            self.page_stack.push((right_page, 0));
+                        }
+                        Err(e) => {
+                            log_warn(&format!("Failed to read right child {right_ptr}: {e}"));
+                            self.page_stack.pop();
+                        }
+                    }
+                }
+            } else {
+                // No right pointer, pop this page
+                self.page_stack.pop();
+            }
+            return;
+        }
+
+        // Process the current cell
+        let (cell_data, page_number) = {
+            let (page, cell_index) = self.page_stack.last_mut().unwrap();
             let is_first_page = page.page_number == 1;
-            let cell_pointers = match page.cell_pointers(is_first_page) {
-                Ok(pointers) => pointers,
+
+            let pointers = match page.cell_pointers(is_first_page) {
+                Ok(p) => p,
                 Err(e) => {
                     log_warn(&format!(
                         "Failed to get cell pointers for interior page {}: {}",
                         page.page_number, e
                     ));
-                    // Skip this page and continue with parent
                     self.page_stack.pop();
-                    continue;
+                    return;
                 }
             };
 
-            if *cell_index >= cell_pointers.len() {
-                // Pop this page and continue with parent
+            if *cell_index >= pointers.len() {
                 self.page_stack.pop();
-                continue;
+                return;
             }
 
-            let cell_offset = cell_pointers[*cell_index];
-            let cell_data = match page.cell_content(cell_offset) {
-                Ok(data) => data,
+            let offset = pointers[*cell_index];
+            let data = match page.cell_content(offset) {
+                Ok(d) => d.to_vec(),
                 Err(e) => {
                     log_warn(&format!(
                         "Failed to get cell content at offset {} on interior page {}: {}",
-                        cell_offset, page.page_number, e
+                        offset, page.page_number, e
                     ));
-                    // Skip this cell and move to next
                     *cell_index += 1;
-                    continue;
+                    return;
                 }
             };
 
-            // Parse the interior cell
-            let cell = match parse_interior_table_cell(cell_data) {
-                Ok(cell) => cell,
-                Err(e) => {
-                    log_warn(&format!(
-                        "Failed to parse interior cell on page {}: {}",
-                        page.page_number, e
-                    ));
-                    // Skip this cell and move to next
-                    *cell_index += 1;
-                    continue;
-                }
-            };
-
-            // Move to next cell in this interior page for the next iteration
             *cell_index += 1;
+            (data, page.page_number)
+        };
 
-            // Descend to the left child of this interior cell
-            if let Some(left_child) = cell.left_child {
-                // Prevent revisiting pages and potential infinite loops
-                if !self.visited_pages.contains(&left_child) {
-                    let child_page = match read_page(left_child) {
-                        Ok(p) => p,
+        // Parse the interior cell and descend
+        match parse_interior_table_cell(&cell_data) {
+            Ok(cell) => {
+                if let Some(left_child) = cell.left_child
+                    && !self.visited_pages.contains(&left_child)
+                {
+                    match read_page(left_child) {
+                        Ok(child_page) => {
+                            self.visited_pages.push(left_child);
+                            self.page_stack.push((child_page, 0));
+                        }
                         Err(e) => {
                             log_warn(&format!("Failed to read child page {left_child}: {e}"));
-                            continue;
                         }
-                    };
-                    self.visited_pages.push(left_child);
-                    self.page_stack.push((child_page, 0));
+                    }
                 }
             }
-
-            // Continue traversal with the newly pushed page (if any)
-            continue;
+            Err(e) => {
+                log_warn(&format!(
+                    "Failed to parse interior cell on page {page_number}: {e}"
+                ));
+            }
         }
     }
 
@@ -476,13 +492,10 @@ fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
         return Err(Error::InvalidFormat("Index cell has no values".into()));
     }
 
-    let rowid = match values.pop().unwrap() {
-        Value::Integer(id) => id,
-        _ => {
-            return Err(Error::InvalidFormat(
-                "Index cell ROWID is not an integer".into(),
-            ));
-        }
+    let Value::Integer(rowid) = values.pop().unwrap() else {
+        return Err(Error::InvalidFormat(
+            "Index cell ROWID is not an integer".into(),
+        ));
     };
 
     Ok(IndexCell { key: values, rowid })
