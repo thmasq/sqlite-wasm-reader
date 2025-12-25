@@ -114,6 +114,10 @@ impl Logger {
 }
 
 /// Initialize the global logger
+///
+/// # Panics
+///
+/// Panics if the global logger mutex is poisoned (i.e., if another thread panicked while holding the lock).
 pub fn init_logger(level: LogLevel) {
     let mut guard = LOGGER.lock().unwrap();
     *guard = Some(Logger::new(level));
@@ -125,6 +129,10 @@ pub fn init_default_logger() {
 }
 
 /// Get the global logger instance
+///
+/// # Panics
+///
+/// Panics if the global logger mutex is poisoned (i.e., if another thread panicked while holding the lock).
 pub fn get_logger() -> Logger {
     let guard = LOGGER.lock().unwrap();
     if let Some(ref logger) = *guard {
@@ -138,6 +146,10 @@ pub fn get_logger() -> Logger {
 }
 
 /// Set the global log level
+///
+/// # Panics
+///
+/// Panics if the global logger mutex is poisoned (i.e., if another thread panicked while holding the lock).
 pub fn set_log_level(level: LogLevel) {
     let mut guard = LOGGER.lock().unwrap();
     if let Some(ref mut logger) = *guard {

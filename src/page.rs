@@ -31,6 +31,12 @@ pub struct Page {
 
 impl Page {
     /// Parse a page from raw bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidFormat` if:
+    /// - The page data is too small to contain the page header.
+    /// - The page type byte in the header is invalid (not a known `SQLite` page type).
     pub fn parse(page_number: u32, data: &[u8], is_first_page: bool) -> Result<Self> {
         let header_offset = if is_first_page { 100 } else { 0 };
 
@@ -64,6 +70,11 @@ impl Page {
     }
 
     /// Get the cell pointer array
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidFormat` if the calculated offset for any cell pointer
+    /// falls outside the bounds of the page data.
     pub fn cell_pointers(&self, is_first_page: bool) -> Result<Vec<u16>> {
         let header_offset = if is_first_page { 100 } else { 0 };
         let cell_pointer_offset = header_offset + if self.page_type.is_leaf() { 8 } else { 12 };
@@ -82,6 +93,11 @@ impl Page {
     }
 
     /// Get cell content at the given offset
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidFormat` if the provided `offset` is greater than or equal
+    /// to the length of the page data.
     pub fn cell_content(&self, offset: u16) -> Result<&[u8]> {
         let offset = offset as usize;
         if offset >= self.data.len() {

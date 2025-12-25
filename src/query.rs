@@ -190,6 +190,13 @@ impl Expr {
 
 impl SelectQuery {
     /// Parse a SELECT SQL statement using sqlparser
+    /// # Errors
+    ///
+    /// Returns `Error::QueryError` if:
+    /// * The SQL string cannot be parsed.
+    /// * The input contains more than one SQL statement.
+    /// * The statement is not a `SELECT` query.
+    /// * The query uses unsupported SQL features (e.g., JOINs, specific expressions).
     pub fn parse(sql: &str) -> Result<Self> {
         let dialect = SQLiteDialect {};
         let statements = Parser::parse_sql(&dialect, sql)
@@ -548,6 +555,10 @@ impl SelectQuery {
 
 impl SelectQuery {
     /// Execute the query against the provided rows
+    /// # Errors
+    ///
+    /// Returns `Error::ColumnNotFound` if the query attempts to select a column that is
+    /// not present in the `all_columns` list.
     pub fn execute(&self, mut rows: Vec<Row>, all_columns: &[String]) -> Result<Vec<Row>> {
         // Apply WHERE conditions
         rows = self.apply_where_conditions(rows);

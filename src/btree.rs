@@ -1,6 +1,12 @@
 //! B-tree traversal functionality
 
-use crate::{Error, Result, logging::log_debug, logging::log_warn, page::Page, value::Value};
+use crate::{
+    Error, Result,
+    logging::{log_debug, log_warn},
+    page::Page,
+    record::parse_value,
+    value::Value,
+};
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use alloc::vec::Vec;
@@ -59,6 +65,18 @@ impl BTreeCursor {
     }
 
     /// Find a cell with the specified key (ROWID) in the B-tree
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The page reader fails to read a page (e.g., I/O error).
+    /// - The page data is invalid or cannot be parsed.
+    /// - An interior page is missing a required right pointer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an interior table cell is parsed but does not contain a left child pointer,
+    /// which violates the invariant that interior table cells must have a left child.
     pub fn find_cell<F>(&mut self, key: i64, mut read_page: F) -> Result<Option<Cell>>
     where
         F: FnMut(u32) -> Result<Page>,
@@ -116,6 +134,16 @@ impl BTreeCursor {
     }
 
     /// Move to the next cell in the B-tree using in-order traversal
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidFormat` if the traversal exceeds the safety iteration limit
+    /// (currently 100,000), which protects against infinite loops caused by cycles in the B-tree.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the page stack is empty when attempting to access the current page,
+    /// though the loop condition checks for emptiness beforehand.
     pub fn next_cell<F>(&mut self, mut read_page: F) -> Result<Option<Cell>>
     where
         F: FnMut(u32) -> Result<Page>,
@@ -312,6 +340,14 @@ impl BTreeCursor {
     }
 
     /// Find all rowids for a composite index key (exact match on all components).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The page reader fails to read a page.
+    /// - The page format is invalid or corrupted.
+    /// - An interior index page is missing its right pointer.
+    /// - Cell content cannot be parsed.
     pub fn find_rowids_by_key<F>(&mut self, key: &[&Value], mut read_page: F) -> Result<Vec<i64>>
     where
         F: FnMut(u32) -> Result<Page>,
@@ -480,8 +516,7 @@ fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
     while header_offset < header_size as usize {
         let (serial_type, bytes_read) = read_varint(&payload[header_offset..])?;
         header_offset += bytes_read;
-        let (value, value_bytes) =
-            crate::record::parse_value(serial_type, &payload[content_offset..])?;
+        let (value, value_bytes) = parse_value(serial_type, &payload[content_offset..]);
         values.push(value);
         content_offset += value_bytes;
     }
@@ -513,8 +548,7 @@ fn parse_interior_index_cell(data: &[u8]) -> Result<InteriorIndexCell> {
     while header_offset < header_size as usize {
         let (serial_type, bytes_read) = read_varint(&payload[header_offset..])?;
         header_offset += bytes_read;
-        let (value, value_bytes) =
-            crate::record::parse_value(serial_type, &payload[content_offset..])?;
+        let (value, value_bytes) = parse_value(serial_type, &payload[content_offset..]);
         values.push(value);
         content_offset += value_bytes;
     }
@@ -526,6 +560,12 @@ fn parse_interior_index_cell(data: &[u8]) -> Result<InteriorIndexCell> {
 }
 
 /// Read a variable-length integer
+///
+/// # Errors
+///
+/// Returns `Error::InvalidVarint` if:
+/// - The data buffer is empty or exhausted before the varint terminates.
+/// - The varint exceeds the maximum size of 9 bytes.
 pub fn read_varint(data: &[u8]) -> Result<(i64, usize)> {
     let mut value = 0i64;
     let mut offset = 0;

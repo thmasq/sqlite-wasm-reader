@@ -44,6 +44,19 @@ pub struct Database {
 
 impl Database {
     /// Open a `SQLite` database file
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal cache initialization fails (which should not happen with valid constants).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be opened (e.g., does not exist, permission denied).
+    /// - The file is not a valid `SQLite` database (invalid magic header).
+    /// - There are I/O errors reading the file.
+    /// - The schema cannot be parsed.
+    ///
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         let mut file_buffered = BufReader::new(file);
@@ -281,6 +294,13 @@ impl Database {
     }
 
     /// List all tables in the database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - There are I/O errors reading the database schema.
+    /// - The schema table contains invalid data.
+    ///
     pub fn tables(&mut self) -> Result<Vec<String>> {
         let schema = self.read_schema()?;
         Ok(schema
@@ -296,6 +316,14 @@ impl Database {
     }
 
     /// Count rows in a table efficiently without reading all data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The specified table does not exist.
+    /// - There are I/O errors reading the table's pages.
+    /// - The database file format is invalid.
+    ///
     pub fn count_table_rows(&mut self, table_name: &str) -> Result<usize> {
         let schema = self.read_schema()?;
 
@@ -421,6 +449,12 @@ impl Database {
     }
 
     /// Get column names for a table
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The specified table does not exist in the database.
+    ///
     pub fn get_table_columns(&mut self, table_name: &str) -> Result<Vec<String>> {
         // Use cached schema instead of reading it again
         let table_info = self
@@ -706,6 +740,14 @@ impl Database {
     }
 
     /// Execute a SELECT SQL query with index acceleration and table scan fallback
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The table specified in the query does not exist.
+    /// - There are I/O errors reading the database.
+    /// - The database format is invalid.
+    ///
     pub fn execute_query(&mut self, query: &SelectQuery) -> Result<Vec<Row>> {
         let table_name = &query.table;
 
@@ -974,7 +1016,7 @@ impl Database {
             match cursor.next_cell(|page_num| self.read_page(page_num)) {
                 Ok(Some(cell)) => {
                     // Parse record with minimal allocations using optimized parser
-                    if let Ok(values) = crate::record::parse_record_optimized(&cell.payload)
+                    if let Ok(values) = crate::record::parse_record(&cell.payload)
                         && values.len() <= columns.len()
                     {
                         reusable_row.clear();

@@ -6,8 +6,14 @@ use byteorder::{BigEndian, ByteOrder};
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use alloc::{string::String, vec::Vec};
 
-/// Parse a record from payload data with optimized allocations
-pub fn parse_record_optimized(payload: &[u8]) -> Result<Vec<Value>> {
+/// Parse a record from payload data
+/// # Errors
+///
+/// Returns an error if:
+/// * The header size varint cannot be read or exceeds the payload length (`InvalidRecord`, `InvalidVarint`).
+/// * The header size is too large (> 64KB) (`InvalidFormat`).
+/// * The record contains too many columns (> 1000) (`InvalidFormat`).
+pub fn parse_record(payload: &[u8]) -> Result<Vec<Value>> {
     if payload.is_empty() {
         return Ok(Vec::new());
     }
@@ -52,7 +58,7 @@ pub fn parse_record_optimized(payload: &[u8]) -> Result<Vec<Value>> {
             continue;
         }
 
-        let (value, bytes_consumed) = parse_value_optimized(&payload[data_offset..], serial_type);
+        let (value, bytes_consumed) = parse_value(serial_type, &payload[data_offset..]);
         values.push(value);
         data_offset += bytes_consumed;
     }
@@ -60,8 +66,8 @@ pub fn parse_record_optimized(payload: &[u8]) -> Result<Vec<Value>> {
     Ok(values)
 }
 
-/// Parse a single value with optimized allocations
-fn parse_value_optimized(data: &[u8], serial_type: i64) -> (Value, usize) {
+#[must_use]
+pub fn parse_value(serial_type: i64, data: &[u8]) -> (Value, usize) {
     match serial_type {
         0 => (Value::Null, 0),
         1 => {
@@ -153,110 +159,4 @@ fn parse_value_optimized(data: &[u8], serial_type: i64) -> (Value, usize) {
             }
         }
     }
-}
-
-/// Parse a value based on its serial type
-pub fn parse_value(serial_type: i64, data: &[u8]) -> Result<(Value, usize)> {
-    match serial_type {
-        0 => Ok((Value::Null, 0)),
-        1 => {
-            if data.is_empty() {
-                return Err(Error::InvalidRecord);
-            }
-            Ok((Value::Integer(i64::from(data[0])), 1))
-        }
-        2 => {
-            if data.len() < 2 {
-                return Err(Error::InvalidRecord);
-            }
-            Ok((Value::Integer(i64::from(BigEndian::read_i16(data))), 2))
-        }
-        3 => {
-            if data.len() < 3 {
-                return Err(Error::InvalidRecord);
-            }
-            let value = (i64::from(data[0]) << 16) | (i64::from(data[1]) << 8) | i64::from(data[2]);
-            // Sign extend from 24-bit
-            let value = if value & 0x80_0000 != 0 {
-                value | 0xffff_ffff_ff00_0000_u64 as i64
-            } else {
-                value
-            };
-            Ok((Value::Integer(value), 3))
-        }
-        4 => {
-            if data.len() < 4 {
-                return Err(Error::InvalidRecord);
-            }
-            Ok((Value::Integer(i64::from(BigEndian::read_i32(data))), 4))
-        }
-        5 => {
-            if data.len() < 6 {
-                return Err(Error::InvalidRecord);
-            }
-            let value = (i64::from(data[0]) << 40)
-                | (i64::from(data[1]) << 32)
-                | (i64::from(data[2]) << 24)
-                | (i64::from(data[3]) << 16)
-                | (i64::from(data[4]) << 8)
-                | i64::from(data[5]);
-            // Sign extend from 48-bit
-            let value = if value & 0x8000_0000_0000 != 0 {
-                value | 0xffff_0000_0000_0000_u64 as i64
-            } else {
-                value
-            };
-            Ok((Value::Integer(value), 6))
-        }
-        6 => {
-            if data.len() < 8 {
-                return Err(Error::InvalidRecord);
-            }
-            Ok((Value::Integer(BigEndian::read_i64(data)), 8))
-        }
-        7 => {
-            if data.len() < 8 {
-                return Err(Error::InvalidRecord);
-            }
-            Ok((Value::Real(BigEndian::read_f64(data)), 8))
-        }
-        8 => Ok((Value::Integer(0), 0)),
-        9 => Ok((Value::Integer(1), 0)),
-        10 | 11 => Err(Error::UnsupportedFeature("Reserved serial types".into())),
-        n if n >= 12 && n % 2 == 0 => {
-            // BLOB with length (n-12)/2
-            let length = ((n - 12) / 2) as usize;
-
-            // Safety check: limit BLOB size (increased significantly)
-            if length > 1_000_000_000 {
-                return Err(Error::InvalidFormat("BLOB too large".into()));
-            }
-
-            if data.len() < length {
-                return Err(Error::InvalidRecord);
-            }
-            Ok((Value::Blob(data[..length].to_vec()), length))
-        }
-        n if n >= 13 && n % 2 == 1 => {
-            // String with length (n-13)/2
-            let length = ((n - 13) / 2) as usize;
-
-            // Safety check: limit string size (increased significantly)
-            if length > 100_000_000 {
-                return Err(Error::InvalidFormat("String too large".into()));
-            }
-
-            if data.len() < length {
-                return Err(Error::InvalidRecord);
-            }
-            let text = core::str::from_utf8(&data[..length])?;
-            Ok((Value::Text(text.to_string()), length))
-        }
-        _ => Err(Error::InvalidFormat("Invalid serial type".into())),
-    }
-}
-
-/// Parse a record from payload data (original version for compatibility)
-pub fn parse_record(payload: &[u8]) -> Result<Vec<Value>> {
-    parse_record_optimized(payload)
 }
