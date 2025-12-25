@@ -391,8 +391,9 @@ impl<IO: Read + Seek> Database<IO> {
             }
         };
 
-        // Only count cells, don't parse them
-        let mut cursor = BTreeCursor::new(root_page);
+        // Create a copy of header to avoid borrowing self while reading pages in the callback
+        let header = self.header;
+        let mut cursor = BTreeCursor::new(root_page, &header);
         let mut row_count = 0;
 
         // Safety check: limit number of iterations to prevent infinite loops
@@ -431,7 +432,9 @@ impl<IO: Read + Seek> Database<IO> {
             }
         };
 
-        let mut cursor = BTreeCursor::new(root_page);
+        // Create a copy of header to avoid borrowing self
+        let header = self.header;
+        let mut cursor = BTreeCursor::new(root_page, &header);
 
         // Safety check: limit number of schema objects
         // Even large databases rarely have more than a few thousand tables/indexes
@@ -515,7 +518,7 @@ impl<IO: Read + Seek> Database<IO> {
         Ok(table_info.columns.clone())
     }
 
-    /// Perform a streaming table scan that processes rows one at a time for better memory efficiency
+    /// Perform a streaming table scan
     fn read_table_rows_streaming<F>(
         &mut self,
         table_name: &str,
@@ -548,9 +551,10 @@ impl<IO: Read + Seek> Database<IO> {
         let rowid_column = self.find_rowid_column(table_name)?;
 
         let root_page = self.read_page(table_info.root_page)?;
-        let mut cursor = BTreeCursor::new(root_page);
 
-        // Safety check: limit number of rows to prevent excessive memory usage
+        let header = self.header;
+        let mut cursor = BTreeCursor::new(root_page, &header);
+
         let max_rows = limit.unwrap_or(1_000_000);
         let mut row_count = 0;
         let mut processed_count = 0;
@@ -613,7 +617,7 @@ impl<IO: Read + Seek> Database<IO> {
         Ok(processed_count)
     }
 
-    /// Perform a full table scan with batch processing for better performance
+    /// Perform a full table scan with batch processing
     fn read_all_table_rows_batch(
         &mut self,
         table_name: &str,
@@ -663,9 +667,10 @@ impl<IO: Read + Seek> Database<IO> {
         let rowid_column = self.find_rowid_column(table_name)?;
 
         let root_page = self.read_page(table_info.root_page)?;
-        let mut cursor = BTreeCursor::new(root_page);
 
-        // Pre-allocate with estimated capacity to reduce reallocations
+        let header = self.header;
+        let mut cursor = BTreeCursor::new(root_page, &header);
+
         let estimated_rows = limit.unwrap_or(10000).min(100_000);
         let mut rows = Vec::with_capacity(estimated_rows);
 
@@ -865,12 +870,13 @@ impl<IO: Read + Seek> Database<IO> {
 
                 // Process this index branch directly
                 let index_root_page = self.read_page(index.root_page)?;
-                let mut cursor = BTreeCursor::new(index_root_page);
 
-                // Convert Vec<&Value> to Vec<&Value> for find_rowids_by_key
+                let header = self.header;
+                let mut cursor = BTreeCursor::new(index_root_page, &header);
+
                 let value_refs: Vec<&Value> = values.clone();
-                let page_reader = |page_num: u32| self.read_page(page_num);
-                let rowids = cursor.find_rowids_by_key(&value_refs, page_reader)?;
+                let rowids =
+                    cursor.find_rowids_by_key(&value_refs, |page_num| self.read_page(page_num))?;
                 all_rowids.extend(rowids);
             }
         }
@@ -883,7 +889,7 @@ impl<IO: Read + Seek> Database<IO> {
 
         // Convert rowids to a vec for deterministic ordering
         let mut all_rowids: Vec<_> = all_rowids.into_iter().collect();
-        all_rowids.sort_unstable(); // Ensure deterministic results
+        all_rowids.sort_unstable();
         let mut rows = Vec::with_capacity(all_rowids.len());
 
         // Fetch each matching row by its ROWID using targeted lookups
@@ -914,37 +920,30 @@ impl<IO: Read + Seek> Database<IO> {
         let rowid_column = self.find_rowid_column(table_name)?;
 
         let root_page = self.read_page(table_info.root_page)?;
-        let mut cursor = BTreeCursor::new(root_page);
 
-        // Try to find the cell with the matching ROWID using binary search
+        let header = self.header;
+        let mut cursor = BTreeCursor::new(root_page, &header);
+
         match cursor.find_cell(rowid, |page_num| self.read_page(page_num)) {
-            Ok(Some(cell)) => {
-                // Parse the row data
-                match parse_record(&cell.payload) {
-                    Ok(values) => {
-                        // Convert to a row with column names
-                        let mut row = HashMap::new();
-                        for (i, column_name) in columns.iter().enumerate() {
-                            if let Some(ref rowid_col) = rowid_column
-                                && column_name == rowid_col
-                            {
-                                // This is the INTEGER PRIMARY KEY column - use rowid from cell
-                                row.insert(column_name.clone(), Value::Integer(cell.key));
-                                continue;
-                            }
-
-                            let value = values.get(i).cloned().unwrap_or(Value::Null);
-                            row.insert(column_name.clone(), value);
+            Ok(Some(cell)) => match parse_record(&cell.payload) {
+                Ok(values) => {
+                    let mut row = HashMap::new();
+                    for (i, column_name) in columns.iter().enumerate() {
+                        if let Some(ref rowid_col) = rowid_column
+                            && column_name == rowid_col
+                        {
+                            row.insert(column_name.clone(), Value::Integer(cell.key));
+                            continue;
                         }
 
-                        Ok(Some(row))
+                        let value = values.get(i).cloned().unwrap_or(Value::Null);
+                        row.insert(column_name.clone(), value);
                     }
-                    Err(_) => {
-                        // Return None instead of failing to allow processing to continue with other rows
-                        Ok(None)
-                    }
+
+                    Ok(Some(row))
                 }
-            }
+                Err(_) => Ok(None),
+            },
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         }
@@ -955,8 +954,6 @@ impl<IO: Read + Seek> Database<IO> {
         log_debug(&format!(
             "Performing fast table scan for table: {table_name}"
         ));
-
-        // Use the high-performance optimized version
         self.read_table_rows_optimized_v2(table_name, limit)
     }
 
@@ -964,10 +961,7 @@ impl<IO: Read + Seek> Database<IO> {
     fn apply_query_operations(mut rows: Vec<Row>, query: &SelectQuery) -> Vec<Row> {
         // Apply WHERE clause
         if let Some(where_expr) = &query.where_expr {
-            rows.retain(|row| {
-                // Use the query's evaluate_expr method
-                SelectQuery::evaluate_expr(row, where_expr)
-            });
+            rows.retain(|row| SelectQuery::evaluate_expr(row, where_expr));
         }
 
         // Apply ORDER BY
@@ -1048,14 +1042,15 @@ impl<IO: Read + Seek> Database<IO> {
             })
             .collect();
 
-        // Read root page
         let root_page = self.read_page(root_page_num)?;
-        let mut cursor = BTreeCursor::new(root_page);
+
+        let header = self.header;
+        let mut cursor = BTreeCursor::new(root_page, &header);
+
         let mut count = 0;
 
         let row_limit = limit.unwrap_or(MAX_ROWS).min(MAX_ROWS);
 
-        // Pre-allocate reusable row HashMap
         let mut reusable_row = HashMap::with_capacity(columns.len());
 
         for iteration in 0..MAX_ITERATIONS {
@@ -1066,13 +1061,11 @@ impl<IO: Read + Seek> Database<IO> {
 
             match cursor.next_cell(|page_num| self.read_page(page_num)) {
                 Ok(Some(cell)) => {
-                    // Parse record with minimal allocations using optimized parser
                     if let Ok(values) = crate::record::parse_record(&cell.payload)
                         && values.len() <= columns.len()
                     {
                         reusable_row.clear();
 
-                        // Fill row with minimal string allocations
                         for (i, col_name) in interned_columns.iter().enumerate() {
                             let value = if i < values.len() {
                                 values[i].clone()
@@ -1082,7 +1075,6 @@ impl<IO: Read + Seek> Database<IO> {
                             reusable_row.insert(col_name.clone(), value);
                         }
 
-                        // Clone the completed row
                         rows.push(reusable_row.clone());
                         count += 1;
                     }
@@ -1105,9 +1097,8 @@ impl<IO: Read + Seek> Database<IO> {
         ));
         Ok(rows)
     }
-} // end impl Database
+}
 
-/// Collect all branches of an OR expression.
 /// Collect all branches of an OR expression.
 fn collect_or_branches(expr: &Expr) -> Vec<&Expr> {
     let mut branches = Vec::new();

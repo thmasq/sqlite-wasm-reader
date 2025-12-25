@@ -3,14 +3,17 @@
 /// `SQLite` file header magic string
 pub const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
-/// Size of a database page header
+/// Minimum size of a database page header (Leaf pages)
 pub const PAGE_HEADER_SIZE: usize = 8;
 
 /// Size of a cell pointer
 pub const CELL_POINTER_SIZE: usize = 2;
 
+/// Size of the header on an overflow page (next page pointer)
+pub const OVERFLOW_PAGE_HEADER_SIZE: usize = 4;
+
 /// `SQLite` file header structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct FileHeader {
     /// Page size in bytes
@@ -55,6 +58,32 @@ pub struct FileHeader {
     pub version_valid_for: u32,
     /// `SQLite` version number
     pub sqlite_version: u32,
+}
+
+impl FileHeader {
+    /// Calculate the usable space on a page (U)
+    /// U = page_size - reserved_space
+    #[must_use]
+    pub fn usable_space(&self) -> u32 {
+        self.page_size - u32::from(self.reserved_space)
+    }
+
+    /// Calculate the maximum local payload (X) for a Leaf Table B-Tree
+    /// X = U - 35
+    #[must_use]
+    pub fn leaf_table_max_local(&self) -> u32 {
+        self.usable_space().saturating_sub(35)
+    }
+
+    /// Calculate the minimum local payload (M) for a Leaf Table B-Tree
+    /// M = ((U - 12) * 32 / 255) - 23
+    #[must_use]
+    pub fn leaf_table_min_local(&self) -> u32 {
+        let u = self.usable_space();
+        let fraction = u32::from(self.leaf_payload_fraction);
+        // Formula from SQLite spec: ((U-12)*I/255)-23
+        (((u.saturating_sub(12)) * fraction) / 255).saturating_sub(23)
+    }
 }
 
 /// Page types in `SQLite`
@@ -157,6 +186,12 @@ mod tests {
         assert_eq!(header.schema_cookie, 1);
         assert_eq!(header.text_encoding, 1);
         assert_eq!(header.sqlite_version, 3039000);
+
+        // Test helper methods
+        assert_eq!(header.usable_space(), 4096);
+        assert_eq!(header.leaf_table_max_local(), 4096 - 35);
+        // ((4096 - 12) * 32 / 255) - 23 = (4084 * 32 / 255) - 23 = 512 - 23 = 489
+        assert_eq!(header.leaf_table_min_local(), 489);
     }
 
     #[test]

@@ -12,7 +12,7 @@ fn main() -> Result<(), Error> {
     }
 
     init_default_logger();
-    set_log_level(LogLevel::Info);
+    set_log_level(LogLevel::Debug);
 
     println!("=== ExcelDB.db Reader ===");
     println!("Opening database: {}", db_path);

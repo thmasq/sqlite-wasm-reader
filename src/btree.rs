@@ -2,6 +2,7 @@
 
 use crate::{
     Error, Result,
+    format::{FileHeader, OVERFLOW_PAGE_HEADER_SIZE},
     logging::{log_debug, log_warn},
     page::Page,
     record::parse_value,
@@ -44,21 +45,24 @@ struct InteriorIndexCell {
 }
 
 /// B-tree cursor for traversing pages
-pub struct BTreeCursor {
+pub struct BTreeCursor<'a> {
     /// Stack of pages being traversed
     /// Each entry contains: (page, `current_cell_index`)
     page_stack: Vec<(Page, usize)>,
     /// Safety counter to prevent infinite loops during traversal
     iteration_count: usize,
+    /// Reference to the database file header (needed for overflow calculations)
+    file_header: &'a FileHeader,
 }
 
-impl BTreeCursor {
+impl<'a> BTreeCursor<'a> {
     /// Create a new cursor starting at the given page
     #[must_use]
-    pub fn new(root_page: Page) -> Self {
+    pub fn new(root_page: Page, file_header: &'a FileHeader) -> Self {
         Self {
             page_stack: vec![(root_page, 0)],
             iteration_count: 0,
+            file_header,
         }
     }
 
@@ -114,7 +118,9 @@ impl BTreeCursor {
                     let mid = low + (high - low) / 2;
                     let cell_offset = cell_pointers[mid];
                     let cell_data = current_page.cell_content(cell_offset)?;
-                    let cell = parse_leaf_table_cell(cell_data)?;
+
+                    // Note: We pass read_page here for overflow handling
+                    let cell = parse_leaf_table_cell(cell_data, self.file_header, &mut read_page)?;
 
                     match cell.key.cmp(&key) {
                         std::cmp::Ordering::Equal => return Ok(Some(cell)),
@@ -134,6 +140,7 @@ impl BTreeCursor {
 
             for &cell_offset in &cell_pointers {
                 let cell_data = current_page.cell_content(cell_offset)?;
+                // Interior table cells don't have payloads (only keys), so no overflow logic needed
                 let cell = parse_interior_table_cell(cell_data)?;
                 if key <= cell.key {
                     next_page_num = cell.left_child.unwrap();
@@ -178,7 +185,8 @@ impl BTreeCursor {
             let is_leaf = self.page_stack.last().unwrap().0.page_type.is_leaf();
 
             if is_leaf {
-                if let Some(cell) = self.process_leaf_page() {
+                // Pass read_page for overflow handling
+                if let Some(cell) = self.process_leaf_page(&mut read_page)? {
                     return Ok(Some(cell));
                 }
             } else {
@@ -190,14 +198,17 @@ impl BTreeCursor {
     /// Process the current leaf page on the stack.
     /// Returns `Ok(Some(cell))` if a cell was found.
     /// Returns `Ok(None)` if the loop should continue (e.g. page finished or error skipped).
-    fn process_leaf_page(&mut self) -> Option<Cell> {
+    fn process_leaf_page<F>(&mut self, read_page: &mut F) -> Result<Option<Cell>>
+    where
+        F: FnMut(u32) -> Result<Page>,
+    {
         let (page, cell_index) = self.page_stack.last_mut().unwrap();
 
         // If we've processed all cells in this leaf page
         if *cell_index >= page.cell_count as usize {
             // Pop this page and continue with parent
             self.page_stack.pop();
-            return None;
+            return Ok(None);
         }
 
         let is_first_page = page.page_number == 1;
@@ -210,14 +221,14 @@ impl BTreeCursor {
                 ));
                 // Skip this page and continue with parent
                 self.page_stack.pop();
-                return None;
+                return Ok(None);
             }
         };
 
         if *cell_index >= cell_pointers.len() {
             // Pop this page and continue with parent
             self.page_stack.pop();
-            return None;
+            return Ok(None);
         }
 
         let cell_offset = cell_pointers[*cell_index];
@@ -231,23 +242,23 @@ impl BTreeCursor {
                 ));
                 // Skip this cell and move to next
                 *cell_index += 1;
-                return None;
+                return Ok(None);
             }
         };
 
         // Move to next cell in current page
         *cell_index += 1;
 
-        // Parse and return the leaf cell
-        match parse_leaf_table_cell(&cell_data) {
-            Ok(cell) => Some(cell),
+        // Parse and return the leaf cell (with overflow support)
+        match parse_leaf_table_cell(&cell_data, self.file_header, read_page) {
+            Ok(cell) => Ok(Some(cell)),
             Err(e) => {
                 log_debug(&format!(
                     "Failed to parse leaf cell on page {}: {}",
                     page.page_number, e
                 ));
                 // Skip this cell and continue to next iteration
-                None
+                Ok(None)
             }
         }
     }
@@ -336,14 +347,6 @@ impl BTreeCursor {
     }
 
     /// Find all rowids for a composite index key (exact match on all components).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The page reader fails to read a page.
-    /// - The page format is invalid or corrupted.
-    /// - An interior index page is missing its right pointer.
-    /// - Cell content cannot be parsed.
     pub fn find_rowids_by_key<F>(&mut self, key: &[&Value], mut read_page: F) -> Result<Vec<i64>>
     where
         F: FnMut(u32) -> Result<Page>,
@@ -381,7 +384,8 @@ impl BTreeCursor {
             // Iterate over cells to find the first key >= search key (lexicographically by component)
             for &cell_offset in &cell_pointers {
                 let cell_data = current_page.cell_content(cell_offset)?;
-                let cell = parse_interior_index_cell(cell_data)?;
+                // Pass read_page for overflow support in index cells
+                let cell = parse_interior_index_cell(cell_data, self.file_header, &mut read_page)?;
                 let cell_key_refs: Vec<&Value> = cell.key.iter().collect();
 
                 let cmp_len = std::cmp::min(key.len(), cell_key_refs.len());
@@ -401,7 +405,8 @@ impl BTreeCursor {
 
         for &cell_offset in &cell_pointers {
             let cell_data = current_page.cell_content(cell_offset)?;
-            let cell = parse_leaf_index_cell(cell_data)?;
+            // Pass read_page for overflow support in index cells
+            let cell = parse_leaf_index_cell(cell_data, self.file_header, &mut read_page)?;
 
             // Need at least as many components as the search key
             if cell.key.len() < key.len() {
@@ -411,76 +416,168 @@ impl BTreeCursor {
             // Exact component-wise equality for the prefix length of key
             let matches = cell.key.iter().zip(key.iter()).all(|(a, b)| a == *b);
 
-            log_debug(&format!(
-                "[BTreeCursor] Checking cell: key={:?} vs search={:?}, matches={}",
-                cell.key, key, matches
-            ));
-
             if matches {
-                log_debug(&format!(
-                    "[BTreeCursor] MATCH FOUND! Adding rowid {}",
-                    cell.rowid
-                ));
                 rowids.push(cell.rowid);
             } else {
                 // Check if we've passed the search key alphabetically
-                // Since the page is sorted, if the current cell key is greater than the search key,
-                // no further cells will match
                 if let (Some(search_first), Some(cell_first)) = (key.first(), cell.key.first()) {
-                    match cell_first.cmp(search_first) {
-                        std::cmp::Ordering::Greater => {
-                            // We've passed the search key, stop searching
-                            log_debug(&format!(
-                                "[BTreeCursor] Cell key {:?} > search key {:?}, stopping early scan on page {}",
-                                cell.key, key, current_page.page_number
-                            ));
-                            break;
-                        }
-                        std::cmp::Ordering::Less => {
-                            // Cell key is less than search key, continue searching
-                            log_debug(&format!(
-                                "[BTreeCursor] Cell key {:?} < search key {:?}, continuing search",
-                                cell.key, key
-                            ));
-                        }
-                        std::cmp::Ordering::Equal => {
-                            // First component matches but full key doesn't - could be composite key mismatch
-                            log_debug(&format!(
-                                "[BTreeCursor] Partial composite key mismatch – cell key {:?} vs search {:?}",
-                                cell.key, key
-                            ));
-                        }
+                    if let std::cmp::Ordering::Greater = cell_first.cmp(search_first) {
+                        break;
                     }
                 }
             }
         }
 
-        log_debug(&format!(
-            "[BTreeCursor] Composite key search found {} rowids",
-            rowids.len()
-        ));
         Ok(rowids)
     }
 }
 
-/// Parse a leaf table cell
-fn parse_leaf_table_cell(data: &[u8]) -> Result<Cell> {
-    let (payload_size, offset) = read_varint(data)?;
-    let (rowid, offset2) = read_varint(&data[offset..])?;
-    let offset = offset + offset2;
+/// Helper function to read payload that might be split across overflow pages.
+///
+/// # Arguments
+/// * `initial_data` - The raw cell data from the current page.
+/// * `offset` - The offset in `initial_data` where the payload (or local part of it) begins.
+/// * `payload_size` - The total size of the payload in bytes (read from varint).
+/// * `max_local` - The maximum number of bytes stored locally on the B-tree page.
+/// * `min_local` - The minimum number of bytes stored locally on the B-tree page.
+/// * `usable_space` - The usable space on a page (Page Size - Reserved).
+/// * `file_header` - The database file header (for page size).
+/// * `read_page` - Callback to fetch overflow pages.
+fn read_payload_with_overflow<F>(
+    initial_data: &[u8],
+    mut offset: usize,
+    payload_size: u64,
+    max_local: u32,
+    min_local: u32,
+    usable_space: u32,
+    read_page: &mut F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(u32) -> Result<Page>,
+{
+    let payload_size_usize = payload_size as usize;
+    let max_local = max_local as usize;
+    let min_local = min_local as usize;
+    let usable_space = usable_space as usize;
 
-    // Add bounds checking to prevent panic
-    let payload_end = offset + payload_size as usize;
-    if payload_end > data.len() {
+    // Calculate how much payload is stored locally
+    let local_size = if payload_size_usize <= max_local {
+        payload_size_usize
+    } else {
+        // Calculate surplus bytes
+        let surplus = min_local + (payload_size_usize - min_local) % (usable_space - 4);
+        if surplus <= max_local {
+            surplus
+        } else {
+            min_local
+        }
+    };
+
+    // Bounds check for local read
+    if offset + local_size > initial_data.len() {
         return Err(Error::InvalidFormat(format!(
-            "Payload size {} exceeds available data (offset: {}, data_len: {})",
-            payload_size,
-            offset,
-            data.len()
+            "Local payload size {} exceeds available data {} (offset: {})",
+            local_size,
+            initial_data.len(),
+            offset
         )));
     }
 
-    let payload = data[offset..payload_end].to_vec();
+    // Read local portion
+    let mut payload = Vec::with_capacity(payload_size_usize);
+    payload.extend_from_slice(&initial_data[offset..offset + local_size]);
+    offset += local_size;
+
+    // If there is overflow, follow the linked list of overflow pages
+    if payload_size_usize > local_size {
+        // The next 4 bytes in the local cell are the page number of the first overflow page
+        if offset + 4 > initial_data.len() {
+            return Err(Error::InvalidFormat(
+                "Missing overflow page pointer in local cell".into(),
+            ));
+        }
+
+        let mut next_page_num = u32::from_be_bytes([
+            initial_data[offset],
+            initial_data[offset + 1],
+            initial_data[offset + 2],
+            initial_data[offset + 3],
+        ]);
+
+        let mut bytes_read = local_size;
+        let overflow_payload_capacity = usable_space - OVERFLOW_PAGE_HEADER_SIZE; // usually 4096 - 4 = 4092
+
+        while bytes_read < payload_size_usize {
+            if next_page_num == 0 {
+                return Err(Error::InvalidFormat(
+                    "Overflow chain terminated early".into(),
+                ));
+            }
+
+            let page = read_page(next_page_num)?;
+
+            // Overflow page format:
+            // - 4 bytes: Next overflow page number (0 if last)
+            // - Remainder: Payload data
+            if page.data.len() < OVERFLOW_PAGE_HEADER_SIZE {
+                return Err(Error::InvalidFormat("Overflow page too small".into()));
+            }
+
+            // Read next pointer
+            let next_ptr_bytes = &page.data[0..4];
+            next_page_num = u32::from_be_bytes([
+                next_ptr_bytes[0],
+                next_ptr_bytes[1],
+                next_ptr_bytes[2],
+                next_ptr_bytes[3],
+            ]);
+
+            // Determine how many bytes to read from this page
+            let remaining = payload_size_usize - bytes_read;
+            let bytes_to_copy = std::cmp::min(remaining, overflow_payload_capacity);
+
+            // Bounds check
+            if OVERFLOW_PAGE_HEADER_SIZE + bytes_to_copy > page.data.len() {
+                return Err(Error::InvalidFormat("Overflow page data too short".into()));
+            }
+
+            payload.extend_from_slice(
+                &page.data[OVERFLOW_PAGE_HEADER_SIZE..OVERFLOW_PAGE_HEADER_SIZE + bytes_to_copy],
+            );
+            bytes_read += bytes_to_copy;
+        }
+    }
+
+    Ok(payload)
+}
+
+/// Parse a leaf table cell (supporting overflow pages)
+fn parse_leaf_table_cell<F>(
+    data: &[u8],
+    file_header: &FileHeader,
+    read_page: &mut F,
+) -> Result<Cell>
+where
+    F: FnMut(u32) -> Result<Page>,
+{
+    let (payload_size, offset) = read_varint(data)?;
+    let (rowid, offset2) = read_varint(&data[offset..])?;
+    let content_offset = offset + offset2;
+
+    // Retrieve threshold constants from file header
+    let max_local = file_header.leaf_table_max_local();
+    let min_local = file_header.leaf_table_min_local();
+    let usable_space = file_header.usable_space();
+
+    let payload = read_payload_with_overflow(
+        data,
+        content_offset,
+        payload_size as u64,
+        max_local,
+        min_local,
+        usable_space,
+        read_page,
+    )?;
 
     Ok(Cell {
         left_child: None,
@@ -491,7 +588,8 @@ fn parse_leaf_table_cell(data: &[u8]) -> Result<Cell> {
 
 /// Parse an interior table cell
 fn parse_interior_table_cell(data: &[u8]) -> Result<Cell> {
-    // Check if we have enough data for the left child pointer
+    // Interior table cells have no payload, only a Child Ptr and a Key.
+    // No overflow logic required.
     if data.len() < 4 {
         return Err(Error::InvalidFormat(format!(
             "Interior cell data too short: {} bytes, need at least 4",
@@ -509,11 +607,38 @@ fn parse_interior_table_cell(data: &[u8]) -> Result<Cell> {
     })
 }
 
-/// Parse a leaf index cell
-fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
+/// Parse a leaf index cell (supporting overflow pages)
+fn parse_leaf_index_cell<F>(
+    data: &[u8],
+    file_header: &FileHeader,
+    read_page: &mut F,
+) -> Result<IndexCell>
+where
+    F: FnMut(u32) -> Result<Page>,
+{
     let (payload_size, offset) = read_varint(data)?;
-    let payload = &data[offset..offset + payload_size as usize];
-    let (header_size, mut header_offset) = read_varint(payload)?;
+
+    // Calculate thresholds for Index B-Trees (different from Table B-Trees)
+    // Leaf Index:
+    // X = ((U-12)*64/255)-23
+    // M = ((U-12)*32/255)-23
+    let u = file_header.usable_space();
+    let u_minus_12 = u.saturating_sub(12);
+    let max_local = (u_minus_12 * 64 / 255).saturating_sub(23);
+    let min_local = (u_minus_12 * 32 / 255).saturating_sub(23);
+
+    let payload = read_payload_with_overflow(
+        data,
+        offset,
+        payload_size as u64,
+        max_local,
+        min_local,
+        u,
+        read_page,
+    )?;
+
+    // Parse values from the reconstructed payload
+    let (header_size, mut header_offset) = read_varint(&payload)?;
     let mut values = Vec::new();
     let mut content_offset = header_size as usize;
 
@@ -525,8 +650,6 @@ fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
         content_offset += value_bytes;
     }
 
-    // In SQLite index leaf cells, the ROWID is the last value in the payload
-    // Extract it from the values array
     if values.is_empty() {
         return Err(Error::InvalidFormat("Index cell has no values".into()));
     }
@@ -540,12 +663,39 @@ fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
     Ok(IndexCell { key: values, rowid })
 }
 
-/// Parse an interior index cell
-fn parse_interior_index_cell(data: &[u8]) -> Result<InteriorIndexCell> {
+/// Parse an interior index cell (supporting overflow pages)
+fn parse_interior_index_cell<F>(
+    data: &[u8],
+    file_header: &FileHeader,
+    read_page: &mut F,
+) -> Result<InteriorIndexCell>
+where
+    F: FnMut(u32) -> Result<Page>,
+{
+    if data.len() < 4 {
+        return Err(Error::InvalidFormat("Interior index cell too small".into()));
+    }
+
     let left_child = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     let (payload_size, offset) = read_varint(&data[4..])?;
-    let payload = &data[4 + offset..4 + offset + payload_size as usize];
-    let (header_size, mut header_offset) = read_varint(payload)?;
+
+    // Interior Index: Same thresholds as Leaf Index
+    let u = file_header.usable_space();
+    let u_minus_12 = u.saturating_sub(12);
+    let max_local = (u_minus_12 * 64 / 255).saturating_sub(23);
+    let min_local = (u_minus_12 * 32 / 255).saturating_sub(23);
+
+    let payload = read_payload_with_overflow(
+        data,
+        4 + offset, // Offset includes the 4-byte left_child ptr
+        payload_size as u64,
+        max_local,
+        min_local,
+        u,
+        read_page,
+    )?;
+
+    let (header_size, mut header_offset) = read_varint(&payload)?;
     let mut values = Vec::new();
     let mut content_offset = header_size as usize;
 
