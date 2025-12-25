@@ -30,8 +30,8 @@ const BATCH_SIZE: usize = 1000;
 pub type Row = HashMap<String, Value>;
 
 /// `SQLite` database reader
-pub struct Database {
-    file: BufReader<File>,
+pub struct Database<IO: Read + Seek> {
+    stream: IO,
     header: FileHeader,
     page_buffer: Vec<u8>,
     /// Cache of table schemas and their indexes
@@ -42,7 +42,7 @@ pub struct Database {
     column_name_cache: HashMap<String, String>,
 }
 
-impl Database {
+impl Database<BufReader<File>> {
     /// Open a `SQLite` database file
     ///
     /// # Panics
@@ -59,11 +59,29 @@ impl Database {
     ///
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
-        let mut file_buffered = BufReader::new(file);
+        let file_buffered = BufReader::new(file);
+        Self::new(file_buffered)
+    }
+}
 
+impl<IO: Read + Seek> Database<IO> {
+    /// Create a new Database from a reader
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal page cache cannot be initialized (e.g., if the cache size constant is set to 0).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The database header cannot be read from the provided stream.
+    /// - The data is not a valid `SQLite` database (invalid magic header).
+    /// - An I/O error occurs while reading the stream or schema.
+    /// - The database schema information cannot be parsed.
+    pub fn new(mut stream: IO) -> Result<Self> {
         // Read and validate header
         let mut header_bytes = [0u8; 100];
-        file_buffered.read_exact(&mut header_bytes)?;
+        stream.read_exact(&mut header_bytes)?;
 
         // Check magic string
         if &header_bytes[0..16] != SQLITE_HEADER_MAGIC {
@@ -75,7 +93,7 @@ impl Database {
         let max_cache_size = 5000;
 
         let mut db = Self {
-            file: file_buffered,
+            stream,
             header,
             page_buffer: vec![0; page_size],
             schema_cache: HashMap::new(),
@@ -283,8 +301,8 @@ impl Database {
         let offset = (page_number - 1) as usize * self.header.page_size as usize;
 
         // Read page data and create page
-        self.file.seek(SeekFrom::Start(offset as u64))?;
-        self.file.read_exact(&mut self.page_buffer)?;
+        self.stream.seek(SeekFrom::Start(offset as u64))?;
+        self.stream.read_exact(&mut self.page_buffer)?;
         let page = Page::parse(page_number, &self.page_buffer, page_number == 1)?;
 
         // Cache the page
