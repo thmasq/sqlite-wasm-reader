@@ -50,7 +50,10 @@ fn create_test_db() {
 fn test_or_condition_with_index() {
     setup();
     let mut db = Database::open("test_db.sqlite").unwrap();
-    let query = SelectQuery::parse("SELECT name, age, city FROM users WHERE age = 30 OR city = 'Los Angeles'").unwrap();
+    let query = SelectQuery::parse(
+        "SELECT name, age, city FROM users WHERE age = 30 OR city = 'Los Angeles'",
+    )
+    .unwrap();
     let mut result = db.execute_query(&query).unwrap();
 
     assert_eq!(result.len(), 3);
@@ -109,7 +112,10 @@ fn test_composite_index_prefix_query() {
 fn test_composite_index_full_key_query() {
     setup();
     let mut db = Database::open("test_db.sqlite").unwrap();
-    let query = SelectQuery::parse("SELECT name, age, city FROM users WHERE age = 30 AND city = 'New York'").unwrap();
+    let query = SelectQuery::parse(
+        "SELECT name, age, city FROM users WHERE age = 30 AND city = 'New York'",
+    )
+    .unwrap();
     let result = db.execute_query(&query).unwrap();
 
     assert_eq!(result.len(), 1);
@@ -127,7 +133,8 @@ fn test_composite_index_full_key_query() {
 fn test_single_column_index_query() {
     setup();
     let mut db = Database::open("test_db.sqlite").unwrap();
-    let query = SelectQuery::parse("SELECT name, age, city FROM users WHERE name = 'Charlie'").unwrap();
+    let query =
+        SelectQuery::parse("SELECT name, age, city FROM users WHERE name = 'Charlie'").unwrap();
     let result = db.execute_query(&query).unwrap();
 
     assert_eq!(result.len(), 1);

@@ -1,6 +1,6 @@
 //! B-tree traversal functionality
 
-use crate::{Error, Result, page::Page, logging::log_warn, logging::log_debug, value::Value};
+use crate::{Error, Result, logging::log_debug, logging::log_warn, page::Page, value::Value};
 
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use alloc::vec::Vec;
@@ -38,7 +38,7 @@ struct InteriorIndexCell {
 /// B-tree cursor for traversing pages
 pub struct BTreeCursor {
     /// Stack of pages being traversed
-    /// Each entry contains: (page, current_cell_index)
+    /// Each entry contains: (page, `current_cell_index`)
     page_stack: Vec<(Page, usize)>,
     /// Track visited pages to prevent infinite loops
     visited_pages: Vec<u32>,
@@ -48,15 +48,16 @@ pub struct BTreeCursor {
 
 impl BTreeCursor {
     /// Create a new cursor starting at the given page
+    #[must_use] 
     pub fn new(root_page: Page) -> Self {
         let page_number = root_page.page_number;
-        BTreeCursor {
+        Self {
             page_stack: vec![(root_page, 0)],
             visited_pages: vec![page_number],
             iteration_count: 0,
         }
     }
-    
+
     /// Find a cell with the specified key (ROWID) in the B-tree
     pub fn find_cell<F>(&mut self, key: i64, mut read_page: F) -> Result<Option<Cell>>
     where
@@ -81,7 +82,7 @@ impl BTreeCursor {
                     let mid = low + (high - low) / 2;
                     let cell_offset = cell_pointers[mid];
                     let cell_data = current_page.cell_content(cell_offset)?;
-                    let cell = parse_leaf_table_cell(&cell_data)?;
+                    let cell = parse_leaf_table_cell(cell_data)?;
 
                     match cell.key.cmp(&key) {
                         std::cmp::Ordering::Equal => return Ok(Some(cell)),
@@ -100,9 +101,9 @@ impl BTreeCursor {
                     Error::InvalidFormat("Interior page missing right pointer".into())
                 })?;
 
-                for &cell_offset in cell_pointers.iter() {
+                for &cell_offset in &cell_pointers {
                     let cell_data = current_page.cell_content(cell_offset)?;
-                    let cell = parse_interior_table_cell(&cell_data)?;
+                    let cell = parse_interior_table_cell(cell_data)?;
                     if key <= cell.key {
                         next_page_num = cell.left_child.unwrap();
                         break;
@@ -114,7 +115,7 @@ impl BTreeCursor {
             }
         }
     }
-    
+
     /// Move to the next cell in the B-tree using in-order traversal
     pub fn next_cell<F>(&mut self, mut read_page: F) -> Result<Option<Cell>>
     where
@@ -123,16 +124,18 @@ impl BTreeCursor {
         // Safety check: prevent infinite loops
         self.iteration_count += 1;
         if self.iteration_count > 100_000 {
-            return Err(Error::InvalidFormat("B-tree traversal exceeded safety limit".into()));
+            return Err(Error::InvalidFormat(
+                "B-tree traversal exceeded safety limit".into(),
+            ));
         }
-        
+
         loop {
             if self.page_stack.is_empty() {
                 return Ok(None);
             }
-            
+
             let (page, cell_index) = self.page_stack.last_mut().unwrap();
-            
+
             // If this is a leaf page
             if page.page_type.is_leaf() {
                 // If we've processed all cells in this leaf page
@@ -141,51 +144,60 @@ impl BTreeCursor {
                     self.page_stack.pop();
                     continue;
                 }
-                
+
                 // Get the current cell from leaf page
                 let is_first_page = page.page_number == 1;
                 let cell_pointers = match page.cell_pointers(is_first_page) {
                     Ok(pointers) => pointers,
                     Err(e) => {
-                        log_warn(&format!("Failed to get cell pointers for page {}: {}", page.page_number, e));
+                        log_warn(&format!(
+                            "Failed to get cell pointers for page {}: {}",
+                            page.page_number, e
+                        ));
                         // Skip this page and continue with parent
                         self.page_stack.pop();
                         continue;
                     }
                 };
-                
+
                 if *cell_index >= cell_pointers.len() {
                     // Pop this page and continue with parent
                     self.page_stack.pop();
                     continue;
                 }
-                
+
                 let cell_offset = cell_pointers[*cell_index];
                 let cell_data = match page.cell_content(cell_offset) {
                     Ok(data) => data,
                     Err(e) => {
-                        log_warn(&format!("Failed to get cell content at offset {} on page {}: {}", cell_offset, page.page_number, e));
+                        log_warn(&format!(
+                            "Failed to get cell content at offset {} on page {}: {}",
+                            cell_offset, page.page_number, e
+                        ));
                         // Skip this cell and move to next
                         *cell_index += 1;
                         continue;
                     }
                 };
-                
+
                 // Move to next cell in current page
                 *cell_index += 1;
-                
+
                 // Parse and return the leaf cell
                 let cell = match parse_leaf_table_cell(cell_data) {
                     Ok(cell) => cell,
                     Err(e) => {
-                        log_debug(&format!("Failed to parse leaf cell on page {}: {}", page.page_number, e));
+                        log_debug(&format!(
+                            "Failed to parse leaf cell on page {}: {}",
+                            page.page_number, e
+                        ));
                         // Skip this cell and continue to next iteration
                         continue;
                     }
                 };
                 return Ok(Some(cell));
             }
-            
+
             // This is an interior page
             if *cell_index >= page.cell_count as usize {
                 // We've processed all cells in this interior page
@@ -198,52 +210,61 @@ impl BTreeCursor {
                         self.page_stack.pop();
                         continue;
                     }
-                    
+
                     let right_page = read_page(right_ptr)?;
                     self.visited_pages.push(right_ptr);
                     self.page_stack.push((right_page, 0));
                     continue;
                 }
-                
+
                 // No right pointer, pop this page and continue with parent
                 self.page_stack.pop();
                 continue;
             }
-            
+
             // Process the current cell in the interior page
             let is_first_page = page.page_number == 1;
             let cell_pointers = match page.cell_pointers(is_first_page) {
                 Ok(pointers) => pointers,
                 Err(e) => {
-                    log_warn(&format!("Failed to get cell pointers for interior page {}: {}", page.page_number, e));
+                    log_warn(&format!(
+                        "Failed to get cell pointers for interior page {}: {}",
+                        page.page_number, e
+                    ));
                     // Skip this page and continue with parent
                     self.page_stack.pop();
                     continue;
                 }
             };
-            
+
             if *cell_index >= cell_pointers.len() {
                 // Pop this page and continue with parent
                 self.page_stack.pop();
                 continue;
             }
-            
+
             let cell_offset = cell_pointers[*cell_index];
             let cell_data = match page.cell_content(cell_offset) {
                 Ok(data) => data,
                 Err(e) => {
-                    log_warn(&format!("Failed to get cell content at offset {} on interior page {}: {}", cell_offset, page.page_number, e));
+                    log_warn(&format!(
+                        "Failed to get cell content at offset {} on interior page {}: {}",
+                        cell_offset, page.page_number, e
+                    ));
                     // Skip this cell and move to next
                     *cell_index += 1;
                     continue;
                 }
             };
-            
+
             // Parse the interior cell
             let cell = match parse_interior_table_cell(cell_data) {
                 Ok(cell) => cell,
                 Err(e) => {
-                    log_warn(&format!("Failed to parse interior cell on page {}: {}", page.page_number, e));
+                    log_warn(&format!(
+                        "Failed to parse interior cell on page {}: {}",
+                        page.page_number, e
+                    ));
                     // Skip this cell and move to next
                     *cell_index += 1;
                     continue;
@@ -260,7 +281,7 @@ impl BTreeCursor {
                     let child_page = match read_page(left_child) {
                         Ok(p) => p,
                         Err(e) => {
-                            log_warn(&format!("Failed to read child page {}: {}", left_child, e));
+                            log_warn(&format!("Failed to read child page {left_child}: {e}"));
                             continue;
                         }
                     };
@@ -279,7 +300,9 @@ impl BTreeCursor {
     where
         F: FnMut(u32) -> Result<Page>,
     {
-        log_debug(&format!("[BTreeCursor] Searching for composite key: {:?}", key));
+        log_debug(&format!(
+            "[BTreeCursor] Searching for composite key: {key:?}"
+        ));
         if self.page_stack.is_empty() {
             return Ok(Vec::new());
         }
@@ -295,14 +318,14 @@ impl BTreeCursor {
 
             let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
             // By default, follow the right-most child ( > all keys )
-            let mut next_page_num = current_page
-                .right_pointer
-                .ok_or_else(|| Error::InvalidFormat("Interior index page missing right pointer".into()))?;
+            let mut next_page_num = current_page.right_pointer.ok_or_else(|| {
+                Error::InvalidFormat("Interior index page missing right pointer".into())
+            })?;
 
             // Iterate over cells to find the first key >= search key (lexicographically by component)
             for &cell_offset in &cell_pointers {
                 let cell_data = current_page.cell_content(cell_offset)?;
-                let cell = parse_interior_index_cell(&cell_data)?;
+                let cell = parse_interior_index_cell(cell_data)?;
                 let cell_key_refs: Vec<&Value> = cell.key.iter().collect();
 
                 let cmp_len = std::cmp::min(key.len(), cell_key_refs.len());
@@ -319,30 +342,29 @@ impl BTreeCursor {
         // We're now on a leaf page – gather all rowids whose key matches exactly
         let mut rowids = Vec::new();
         let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
-        
+
         for &cell_offset in &cell_pointers {
             let cell_data = current_page.cell_content(cell_offset)?;
-            let cell = parse_leaf_index_cell(&cell_data)?;
+            let cell = parse_leaf_index_cell(cell_data)?;
 
             // Need at least as many components as the search key
             if cell.key.len() < key.len() {
                 continue;
             }
-            
+
             // Exact component-wise equality for the prefix length of key
-            let matches = cell
-                .key
-                .iter()
-                .zip(key.iter())
-                .all(|(a, b)| a == *b);
-            
+            let matches = cell.key.iter().zip(key.iter()).all(|(a, b)| a == *b);
+
             log_debug(&format!(
                 "[BTreeCursor] Checking cell: key={:?} vs search={:?}, matches={}",
                 cell.key, key, matches
             ));
-            
+
             if matches {
-                log_debug(&format!("[BTreeCursor] MATCH FOUND! Adding rowid {}", cell.rowid));
+                log_debug(&format!(
+                    "[BTreeCursor] MATCH FOUND! Adding rowid {}",
+                    cell.rowid
+                ));
                 rowids.push(cell.rowid);
             } else {
                 // Check if we've passed the search key alphabetically
@@ -357,14 +379,14 @@ impl BTreeCursor {
                                 cell.key, key, current_page.page_number
                             ));
                             break;
-                        },
+                        }
                         std::cmp::Ordering::Less => {
                             // Cell key is less than search key, continue searching
                             log_debug(&format!(
                                 "[BTreeCursor] Cell key {:?} < search key {:?}, continuing search",
                                 cell.key, key
                             ));
-                        },
+                        }
                         std::cmp::Ordering::Equal => {
                             // First component matches but full key doesn't - could be composite key mismatch
                             log_debug(&format!(
@@ -378,11 +400,11 @@ impl BTreeCursor {
         }
 
         log_debug(&format!(
-            "[BTreeCursor] Composite key search found {} rowids", rowids.len()
+            "[BTreeCursor] Composite key search found {} rowids",
+            rowids.len()
         ));
         Ok(rowids)
     }
-
 }
 
 /// Parse a leaf table cell
@@ -390,18 +412,20 @@ fn parse_leaf_table_cell(data: &[u8]) -> Result<Cell> {
     let (payload_size, offset) = read_varint(data)?;
     let (rowid, offset2) = read_varint(&data[offset..])?;
     let offset = offset + offset2;
-    
+
     // Add bounds checking to prevent panic
     let payload_end = offset + payload_size as usize;
     if payload_end > data.len() {
         return Err(Error::InvalidFormat(format!(
             "Payload size {} exceeds available data (offset: {}, data_len: {})",
-            payload_size, offset, data.len()
+            payload_size,
+            offset,
+            data.len()
         )));
     }
-    
+
     let payload = data[offset..payload_end].to_vec();
-    
+
     Ok(Cell {
         left_child: None,
         key: rowid,
@@ -418,10 +442,10 @@ fn parse_interior_table_cell(data: &[u8]) -> Result<Cell> {
             data.len()
         )));
     }
-    
+
     let left_child = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     let (rowid, _) = read_varint(&data[4..])?;
-    
+
     Ok(Cell {
         left_child: Some(left_child),
         key: rowid,
@@ -440,7 +464,8 @@ fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
     while header_offset < header_size as usize {
         let (serial_type, bytes_read) = read_varint(&payload[header_offset..])?;
         header_offset += bytes_read;
-        let (value, value_bytes) = crate::record::parse_value(serial_type, &payload[content_offset..])?;
+        let (value, value_bytes) =
+            crate::record::parse_value(serial_type, &payload[content_offset..])?;
         values.push(value);
         content_offset += value_bytes;
     }
@@ -450,10 +475,14 @@ fn parse_leaf_index_cell(data: &[u8]) -> Result<IndexCell> {
     if values.is_empty() {
         return Err(Error::InvalidFormat("Index cell has no values".into()));
     }
-    
+
     let rowid = match values.pop().unwrap() {
         Value::Integer(id) => id,
-        _ => return Err(Error::InvalidFormat("Index cell ROWID is not an integer".into())),
+        _ => {
+            return Err(Error::InvalidFormat(
+                "Index cell ROWID is not an integer".into(),
+            ));
+        }
     };
 
     Ok(IndexCell { key: values, rowid })
@@ -471,7 +500,8 @@ fn parse_interior_index_cell(data: &[u8]) -> Result<InteriorIndexCell> {
     while header_offset < header_size as usize {
         let (serial_type, bytes_read) = read_varint(&payload[header_offset..])?;
         header_offset += bytes_read;
-        let (value, value_bytes) = crate::record::parse_value(serial_type, &payload[content_offset..])?;
+        let (value, value_bytes) =
+            crate::record::parse_value(serial_type, &payload[content_offset..])?;
         values.push(value);
         content_offset += value_bytes;
     }
@@ -486,25 +516,25 @@ fn parse_interior_index_cell(data: &[u8]) -> Result<InteriorIndexCell> {
 pub fn read_varint(data: &[u8]) -> Result<(i64, usize)> {
     let mut value = 0i64;
     let mut offset = 0;
-    
+
     for i in 0..9 {
         if offset >= data.len() {
             return Err(Error::InvalidVarint);
         }
-        
+
         let byte = data[offset];
         offset += 1;
-        
+
         if i < 8 {
-            value = (value << 7) | ((byte & 0x7f) as i64);
+            value = (value << 7) | i64::from(byte & 0x7f);
             if byte < 0x80 {
                 return Ok((value, offset));
             }
         } else {
-            value = (value << 8) | (byte as i64);
+            value = (value << 8) | i64::from(byte);
             return Ok((value, offset));
         }
     }
-    
+
     Err(Error::InvalidVarint)
 }

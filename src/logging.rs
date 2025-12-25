@@ -1,11 +1,11 @@
-//! Logging functionality for sqlite_wasm_reader
+//! Logging functionality for `sqlite_wasm_reader`
 
 use std::sync::Mutex;
 
 static LOGGER: Mutex<Option<Logger>> = Mutex::new(None);
 
 /// Log levels in order of increasing verbosity
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub enum LogLevel {
     /// Only critical errors that prevent operation
     Error = 0,
@@ -21,18 +21,20 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// Get the default log level
-    pub fn default() -> Self {
-        LogLevel::Info
+    #[must_use] 
+    pub const fn default() -> Self {
+        Self::Info
     }
-    
+
     /// Parse log level from string
+    #[must_use] 
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "error" => Some(LogLevel::Error),
-            "warn" | "warning" => Some(LogLevel::Warn),
-            "info" => Some(LogLevel::Info),
-            "debug" => Some(LogLevel::Debug),
-            "trace" => Some(LogLevel::Trace),
+            "error" => Some(Self::Error),
+            "warn" | "warning" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
             _ => None,
         }
     }
@@ -46,25 +48,28 @@ pub struct Logger {
 
 impl Logger {
     /// Create a new logger with the specified level
-    pub fn new(level: LogLevel) -> Self {
-        Logger { level }
+    #[must_use] 
+    pub const fn new(level: LogLevel) -> Self {
+        Self { level }
     }
-    
+
     /// Create a logger with default level (Info)
+    #[must_use] 
     pub fn default() -> Self {
-        Logger::new(LogLevel::default())
+        Self::new(LogLevel::default())
     }
-    
+
     /// Set the log level
-    pub fn set_level(&mut self, level: LogLevel) {
+    pub const fn set_level(&mut self, level: LogLevel) {
         self.level = level;
     }
-    
+
     /// Get the current log level
-    pub fn level(&self) -> LogLevel {
+    #[must_use] 
+    pub const fn level(&self) -> LogLevel {
         self.level
     }
-    
+
     /// Log a message if the level is enabled
     pub fn log(&self, level: LogLevel, message: &str) {
         if level <= self.level {
@@ -75,30 +80,30 @@ impl Logger {
                 LogLevel::Debug => "DEBUG",
                 LogLevel::Trace => "TRACE",
             };
-            eprintln!("[sqlite_wasm_reader] {}: {}", prefix, message);
+            eprintln!("[sqlite_wasm_reader] {prefix}: {message}");
         }
     }
-    
+
     /// Log an error message
     pub fn error(&self, message: &str) {
         self.log(LogLevel::Error, message);
     }
-    
+
     /// Log a warning message
     pub fn warn(&self, message: &str) {
         self.log(LogLevel::Warn, message);
     }
-    
+
     /// Log an info message
     pub fn info(&self, message: &str) {
         self.log(LogLevel::Info, message);
     }
-    
+
     /// Log a debug message
     pub fn debug(&self, message: &str) {
         self.log(LogLevel::Debug, message);
     }
-    
+
     /// Log a trace message
     pub fn trace(&self, message: &str) {
         self.log(LogLevel::Trace, message);
@@ -161,6 +166,7 @@ pub fn log_trace(message: &str) {
 }
 
 /// Check if a log level is enabled
+#[must_use] 
 pub fn is_enabled(level: LogLevel) -> bool {
     level <= get_logger().level()
 }
@@ -191,11 +197,11 @@ mod tests {
         assert_eq!(LogLevel::from_str("info"), Some(LogLevel::Info));
         assert_eq!(LogLevel::from_str("debug"), Some(LogLevel::Debug));
         assert_eq!(LogLevel::from_str("trace"), Some(LogLevel::Trace));
-        
+
         // Case insensitive
         assert_eq!(LogLevel::from_str("ERROR"), Some(LogLevel::Error));
         assert_eq!(LogLevel::from_str("Debug"), Some(LogLevel::Debug));
-        
+
         // Invalid values
         assert_eq!(LogLevel::from_str("invalid"), None);
         assert_eq!(LogLevel::from_str(""), None);
@@ -207,7 +213,7 @@ mod tests {
         assert!(LogLevel::Warn < LogLevel::Info);
         assert!(LogLevel::Info < LogLevel::Debug);
         assert!(LogLevel::Debug < LogLevel::Trace);
-        
+
         assert!(LogLevel::Trace > LogLevel::Debug);
         assert!(LogLevel::Debug > LogLevel::Info);
         assert!(LogLevel::Info > LogLevel::Warn);
@@ -218,7 +224,7 @@ mod tests {
     fn test_logger_creation() {
         let logger = Logger::new(LogLevel::Debug);
         assert_eq!(logger.level(), LogLevel::Debug);
-        
+
         let default_logger = Logger::default();
         assert_eq!(default_logger.level(), LogLevel::Info);
     }
@@ -227,7 +233,7 @@ mod tests {
     fn test_logger_level_setting() {
         let mut logger = Logger::new(LogLevel::Info);
         assert_eq!(logger.level(), LogLevel::Info);
-        
+
         logger.set_level(LogLevel::Debug);
         assert_eq!(logger.level(), LogLevel::Debug);
     }
@@ -252,7 +258,7 @@ mod tests {
     fn test_logging_functions() {
         init_default_logger();
         set_log_level(LogLevel::Debug);
-        
+
         // These should not panic
         log_error("Test error message");
         log_warn("Test warning message");
@@ -265,13 +271,13 @@ mod tests {
     fn test_is_enabled() {
         init_default_logger();
         set_log_level(LogLevel::Info);
-        
+
         assert!(is_enabled(LogLevel::Error));
         assert!(is_enabled(LogLevel::Warn));
         assert!(is_enabled(LogLevel::Info));
         assert!(!is_enabled(LogLevel::Debug));
         assert!(!is_enabled(LogLevel::Trace));
-        
+
         set_log_level(LogLevel::Trace);
         assert!(is_enabled(LogLevel::Error));
         assert!(is_enabled(LogLevel::Warn));
@@ -279,4 +285,4 @@ mod tests {
         assert!(is_enabled(LogLevel::Debug));
         assert!(is_enabled(LogLevel::Trace));
     }
-} 
+}

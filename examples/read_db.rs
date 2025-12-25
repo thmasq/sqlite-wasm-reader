@@ -10,24 +10,24 @@ fn main() -> Result<(), Error> {
         eprintln!("Usage: {} <database.db>", args[0]);
         std::process::exit(1);
     }
-    
+
     let db_path = &args[1];
-    
+
     // Open the database
     println!("Opening database: {}", db_path);
     let mut db = Database::open(db_path)?;
-    
+
     // List all tables
     println!("\nTables in the database:");
     let tables = db.tables()?;
     for table in &tables {
         println!("  - {}", table);
     }
-    
+
     // Read and display data from each table
     for table in tables {
         println!("\n--- Table: {} ---", table);
-        
+
         // First, count rows efficiently
         match db.count_table_rows(&table) {
             Ok(count) => {
@@ -38,7 +38,7 @@ fn main() -> Result<(), Error> {
                 continue;
             }
         }
-        
+
         // Show columns for the table
         match db.get_table_columns(&table) {
             Ok(columns) => {
@@ -48,9 +48,12 @@ fn main() -> Result<(), Error> {
                 println!("  Error getting columns: {}", e);
             }
         }
-        
+
         // Try to execute a query to get sample data
-        match db.execute_query(&sqlite_wasm_reader::SelectQuery::parse(&format!("SELECT * FROM {} LIMIT 10", table))?) {
+        match db.execute_query(&sqlite_wasm_reader::SelectQuery::parse(&format!(
+            "SELECT * FROM {} LIMIT 10",
+            table
+        ))?) {
             Ok(rows) => {
                 if rows.is_empty() {
                     println!("  (empty table)");
@@ -60,11 +63,14 @@ fn main() -> Result<(), Error> {
                 }
             }
             Err(e) => {
-                println!("  Error querying table: {} (table may not have suitable indexes)", e);
+                println!(
+                    "  Error querying table: {} (table may not have suitable indexes)",
+                    e
+                );
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -74,16 +80,20 @@ fn display_table_data(rows: &[sqlite_wasm_reader::Row]) {
         println!("  (empty table)");
         return;
     }
-    
+
     // Print column headers from the first row
     if let Some(first_row) = rows.first() {
         let columns: Vec<&String> = first_row.keys().collect();
-        println!("  Columns: {}", columns.iter()
-            .map(|c| c.as_str())
-            .collect::<Vec<_>>()
-            .join(", "));
+        println!(
+            "  Columns: {}",
+            columns
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
-    
+
     // Print each row
     for (i, row) in rows.iter().enumerate() {
         println!("\n  Row {}:", i + 1);
@@ -102,4 +112,4 @@ fn format_value(value: &Value) -> String {
         Value::Text(s) => format!("\"{}\"", s),
         Value::Blob(b) => format!("<BLOB {} bytes>", b.len()),
     }
-} 
+}

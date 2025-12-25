@@ -1,6 +1,6 @@
-//! SQLite file format constants and structures
+//! `SQLite` file format constants and structures
 
-/// SQLite file header magic string
+/// `SQLite` file header magic string
 pub const SQLITE_HEADER_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
 /// Size of a database page header
@@ -9,7 +9,7 @@ pub const PAGE_HEADER_SIZE: usize = 8;
 /// Size of a cell pointer
 pub const CELL_POINTER_SIZE: usize = 2;
 
-/// SQLite file header structure
+/// `SQLite` file header structure
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct FileHeader {
@@ -53,11 +53,11 @@ pub struct FileHeader {
     pub application_id: u32,
     /// Version valid for
     pub version_valid_for: u32,
-    /// SQLite version number
+    /// `SQLite` version number
     pub sqlite_version: u32,
 }
 
-/// Page types in SQLite
+/// Page types in `SQLite`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageType {
     /// Interior index b-tree page
@@ -71,18 +71,20 @@ pub enum PageType {
 }
 
 impl PageType {
-    pub fn from_byte(byte: u8) -> Option<Self> {
+    #[must_use] 
+    pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
-            0x02 => Some(PageType::InteriorIndex),
-            0x05 => Some(PageType::InteriorTable),
-            0x0a => Some(PageType::LeafIndex),
-            0x0d => Some(PageType::LeafTable),
+            0x02 => Some(Self::InteriorIndex),
+            0x05 => Some(Self::InteriorTable),
+            0x0a => Some(Self::LeafIndex),
+            0x0d => Some(Self::LeafTable),
             _ => None,
         }
     }
-    
-    pub fn is_leaf(&self) -> bool {
-        matches!(self, PageType::LeafIndex | PageType::LeafTable)
+
+    #[must_use] 
+    pub const fn is_leaf(&self) -> bool {
+        matches!(self, Self::LeafIndex | Self::LeafTable)
     }
 }
 
@@ -188,4 +190,4 @@ mod tests {
         assert!(debug_str.contains("database_size: 10"));
         assert!(debug_str.contains("sqlite_version: 3039000"));
     }
-} 
+}

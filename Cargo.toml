@@ -1,7 +1,7 @@
 [package]
 name = "sqlite_wasm_reader"
 version = "0.3.1"
-edition = "2021"
+edition = "2024"
 authors = ["Ramanan Ravikumar <ramanan@deepfence.io>"]
 description = "A pure Rust SQLite reader library for WASI environments"
 documentation = "https://docs.rs/sqlite_wasm_reader"
@@ -13,21 +13,16 @@ readme = "README.md"
 
 [dependencies]
 byteorder = "1.5.0"
-sqlparser = { version = "0.57.0", default-features = false }
-thiserror = "2.0.12"
-lru = "0.16.0"
+sqlparser = { version = "0.60.0", default-features = false }
+thiserror = "2.0.17"
+lru = "0.16.2"
 
 [dev-dependencies]
-rusqlite = "0.37.0"
-wasmtime = "34.0.1"
-wasmtime-wasi = "34.0.1"
-env_logger = "0.11"
+rusqlite = "0.38.0"
+wasmtime = "40.0.0"
+wasmtime-wasi = "40.0.0"
+env_logger = "0.11.8"
 
 [lib]
 name = "sqlite_wasm_reader"
 path = "src/lib.rs"
-
-[profile.release]
-lto = true
-opt-level = "z"
-codegen-units = 1
