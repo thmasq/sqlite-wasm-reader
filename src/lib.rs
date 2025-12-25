@@ -1,3 +1,12 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc
+)]
+
 //! `SQLite` WASM Reader - A pure Rust `SQLite` reader for WASI environments
 //!
 //! This library provides a lightweight `SQLite` database reader that can be used

@@ -122,9 +122,7 @@ impl Database {
                         }
                     }
                     Err(e) => {
-                        log_warn(&format!(
-                            "Failed to parse CREATE INDEX for '{name}': {e}"
-                        ));
+                        log_warn(&format!("Failed to parse CREATE INDEX for '{name}': {e}"));
                     }
                 }
             }
@@ -333,9 +331,7 @@ impl Database {
             }
         }
 
-        log_debug(&format!(
-            "Counted {row_count} rows in table {table_name}"
-        ));
+        log_debug(&format!("Counted {row_count} rows in table {table_name}"));
         Ok(row_count)
     }
 
@@ -878,7 +874,7 @@ impl Database {
         if let Some(where_expr) = &query.where_expr {
             rows.retain(|row| {
                 // Use the query's evaluate_expr method
-                query.evaluate_expr(row, where_expr)
+                SelectQuery::evaluate_expr(row, where_expr)
             });
         }
 

@@ -71,7 +71,7 @@ pub enum PageType {
 }
 
 impl PageType {
-    #[must_use] 
+    #[must_use]
     pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0x02 => Some(Self::InteriorIndex),
@@ -82,7 +82,7 @@ impl PageType {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn is_leaf(&self) -> bool {
         matches!(self, Self::LeafIndex | Self::LeafTable)
     }

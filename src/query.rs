@@ -170,19 +170,19 @@ impl Expr {
     }
 
     /// Logical AND: `self AND other`
-    #[must_use] 
+    #[must_use]
     pub fn and(self, other: Self) -> Self {
         Self::And(Box::new(self), Box::new(other))
     }
 
     /// Logical OR: `self OR other`
-    #[must_use] 
+    #[must_use]
     pub fn or(self, other: Self) -> Self {
         Self::Or(Box::new(self), Box::new(other))
     }
 
     /// Logical NOT: `NOT self`
-    #[must_use] 
+    #[must_use]
     pub fn not(self) -> Self {
         Self::Not(Box::new(self))
     }
@@ -211,9 +211,7 @@ impl SelectQuery {
     }
 
     fn from_sqlparser_query(query: &Query) -> Result<Self> {
-        let select = if let SetExpr::Select(select) = &*query.body {
-            select
-        } else {
+        let SetExpr::Select(select) = &*query.body else {
             return Err(Error::QueryError("Unsupported query type".to_string()));
         };
 
@@ -501,7 +499,9 @@ impl SelectQuery {
                         Ok(None)
                     }
                 }
-                _ => Err(Error::QueryError("Unsupported ORDER BY kind".to_string())),
+                sqlparser::ast::OrderByKind::All(_) => {
+                    Err(Error::QueryError("Unsupported ORDER BY kind".to_string()))
+                }
             }
         } else {
             Ok(None)
@@ -524,7 +524,7 @@ impl SelectQuery {
                         Ok(None)
                     }
                 }
-                _ => Err(Error::QueryError(
+                sqlparser::ast::LimitClause::OffsetCommaLimit { .. } => Err(Error::QueryError(
                     "Unsupported LIMIT clause type".to_string(),
                 )),
             }
@@ -538,11 +538,11 @@ impl SelectQuery {
     /// Execute the query against the provided rows
     pub fn execute(&self, mut rows: Vec<Row>, all_columns: &[String]) -> Result<Vec<Row>> {
         // Apply WHERE conditions
-        rows = self.apply_where_conditions(rows)?;
+        rows = self.apply_where_conditions(rows);
 
         // Apply ORDER BY
         if let Some(ref order_by) = self.order_by {
-            rows = self.apply_order_by(rows, order_by)?;
+            rows = Self::apply_order_by(rows, order_by);
         }
 
         // Apply column selection
@@ -557,15 +557,15 @@ impl SelectQuery {
     }
 
     /// Apply WHERE conditions to filter rows
-    fn apply_where_conditions(&self, rows: Vec<Row>) -> Result<Vec<Row>> {
+    fn apply_where_conditions(&self, rows: Vec<Row>) -> Vec<Row> {
         if self.where_expr.is_none() {
-            return Ok(rows);
+            return rows;
         }
 
         let total_rows = rows.len();
         let filtered_rows: Vec<Row> = rows
             .into_iter()
-            .filter(|row| self.evaluate_expr(row, self.where_expr.as_ref().unwrap()))
+            .filter(|row| Self::evaluate_expr(row, self.where_expr.as_ref().unwrap()))
             .collect();
 
         // Add debug logging for WHERE clause filtering
@@ -575,69 +575,70 @@ impl SelectQuery {
             total_rows
         ));
 
-        Ok(filtered_rows)
+        filtered_rows
     }
 
     /// Evaluate a WHERE expression against a row
-    #[must_use] 
-    pub fn evaluate_expr(&self, row: &Row, expr: &Expr) -> bool {
+    #[must_use]
+    pub fn evaluate_expr(row: &Row, expr: &Expr) -> bool {
         match expr {
             Expr::Comparison {
                 column,
                 operator,
                 value,
             } => {
-                let row_value = match row.get(column.as_str()) {
-                    Some(value) => value,
-                    None => return false, // Column doesn't exist
+                let Some(row_value) = row.get(column.as_str()) else {
+                    return false;
                 };
 
                 match operator {
-                    ComparisonOperator::Equal => self.values_equal(row_value, value),
-                    ComparisonOperator::NotEqual => !self.values_equal(row_value, value),
-                    ComparisonOperator::LessThan => self.value_less_than(row_value, value),
+                    ComparisonOperator::Equal => Self::values_equal(row_value, value),
+                    ComparisonOperator::NotEqual => !Self::values_equal(row_value, value),
+                    ComparisonOperator::LessThan => Self::value_less_than(row_value, value),
                     ComparisonOperator::LessThanOrEqual => {
-                        self.value_less_than(row_value, value)
-                            || self.values_equal(row_value, value)
+                        Self::value_less_than(row_value, value)
+                            || Self::values_equal(row_value, value)
                     }
                     ComparisonOperator::GreaterThan => {
-                        !self.value_less_than(row_value, value)
-                            && !self.values_equal(row_value, value)
+                        !Self::value_less_than(row_value, value)
+                            && !Self::values_equal(row_value, value)
                     }
                     ComparisonOperator::GreaterThanOrEqual => {
-                        !self.value_less_than(row_value, value)
+                        !Self::value_less_than(row_value, value)
                     }
-                    ComparisonOperator::Like => self.value_like(row_value, value),
+                    ComparisonOperator::Like => Self::value_like(row_value, value),
                 }
             }
             Expr::And(left, right) => {
-                self.evaluate_expr(row, left) && self.evaluate_expr(row, right)
+                Self::evaluate_expr(row, left) && Self::evaluate_expr(row, right)
             }
             Expr::Or(left, right) => {
-                self.evaluate_expr(row, left) || self.evaluate_expr(row, right)
+                Self::evaluate_expr(row, left) || Self::evaluate_expr(row, right)
             }
-            Expr::Not(expr) => !self.evaluate_expr(row, expr),
-            Expr::IsNull(column) => row.get(column.as_str()).is_some_and(super::value::Value::is_null),
+            Expr::Not(expr) => !Self::evaluate_expr(row, expr),
+            Expr::IsNull(column) => row
+                .get(column.as_str())
+                .is_some_and(super::value::Value::is_null),
             Expr::IsNotNull(column) => row.get(column.as_str()).is_some_and(|v| !v.is_null()),
             Expr::In { column, values } => {
                 let row_value = row.get(column.as_str()).cloned().unwrap_or(Value::Null);
-                values.iter().any(|v| self.values_equal(&row_value, v))
+                values.iter().any(|v| Self::values_equal(&row_value, v))
             }
             Expr::Between { column, low, high } => {
-                let row_value = match row.get(column.as_str()) {
-                    Some(value) => value,
-                    None => return false, // Column doesn't exist
+                let Some(row_value) = row.get(column.as_str()) else {
+                    return false;
                 };
 
                 // Check if row_value >= low AND row_value <= high
-                (self.values_equal(row_value, low) || !self.value_less_than(row_value, low))
-                    && (self.values_equal(row_value, high) || self.value_less_than(row_value, high))
+                (Self::values_equal(row_value, low) || !Self::value_less_than(row_value, low))
+                    && (Self::values_equal(row_value, high)
+                        || Self::value_less_than(row_value, high))
             }
         }
     }
 
     /// Compare two values for equality
-    fn values_equal(&self, a: &Value, b: &Value) -> bool {
+    fn values_equal(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Null, Value::Null) => true,
             (Value::Integer(a), Value::Integer(b)) => a == b,
@@ -652,7 +653,7 @@ impl SelectQuery {
     }
 
     /// Check if value a is less than value b
-    fn value_less_than(&self, a: &Value, b: &Value) -> bool {
+    fn value_less_than(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Integer(a), Value::Integer(b)) => a < b,
             (Value::Real(a), Value::Real(b)) => a < b,
@@ -664,7 +665,7 @@ impl SelectQuery {
     }
 
     /// Check if value matches LIKE pattern (improved implementation)
-    fn value_like(&self, value: &Value, pattern: &Value) -> bool {
+    fn value_like(value: &Value, pattern: &Value) -> bool {
         match (value, pattern) {
             (Value::Text(text), Value::Text(pattern)) => {
                 // Improved LIKE implementation with % wildcard
@@ -730,13 +731,13 @@ impl SelectQuery {
     }
 
     /// Apply ORDER BY to sort rows
-    fn apply_order_by(&self, mut rows: Vec<Row>, order_by: &OrderBy) -> Result<Vec<Row>> {
+    fn apply_order_by(mut rows: Vec<Row>, order_by: &OrderBy) -> Vec<Row> {
         rows.sort_by(|a, b| {
             let val_a = a.get(order_by.column.as_str());
             let val_b = b.get(order_by.column.as_str());
 
             let cmp = match (val_a, val_b) {
-                (Some(a), Some(b)) => self.compare_values(a, b),
+                (Some(a), Some(b)) => Self::compare_values(a, b),
                 (Some(_), None) => std::cmp::Ordering::Greater,
                 (None, Some(_)) => std::cmp::Ordering::Less,
                 (None, None) => std::cmp::Ordering::Equal,
@@ -749,11 +750,11 @@ impl SelectQuery {
             }
         });
 
-        Ok(rows)
+        rows
     }
 
     /// Compare two values for ordering
-    fn compare_values(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+    fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         match (a, b) {
             (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
             (Value::Null, _) => std::cmp::Ordering::Less,
@@ -815,7 +816,7 @@ impl SelectQuery {
 
     /// Specify the columns to select (equivalent to the projection in SQL).
     /// Passing an empty vector is the same as `SELECT *`.
-    #[must_use] 
+    #[must_use]
     pub fn select_columns(mut self, columns: Vec<String>) -> Self {
         if columns.is_empty() {
             self.columns = None;
@@ -826,13 +827,14 @@ impl SelectQuery {
     }
 
     /// Attach a WHERE expression to the query.
-    #[must_use] 
+    #[must_use]
     pub fn with_where(mut self, expr: Expr) -> Self {
         self.where_expr = Some(expr);
         self
     }
 
     /// Attach an ORDER BY clause to the query.
+    #[must_use]
     pub fn with_order_by(mut self, column: impl Into<String>, ascending: bool) -> Self {
         self.order_by = Some(OrderBy {
             column: column.into(),
@@ -842,7 +844,7 @@ impl SelectQuery {
     }
 
     /// Attach a LIMIT clause to the query.
-    #[must_use] 
+    #[must_use]
     pub const fn with_limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
@@ -907,52 +909,50 @@ mod tests {
 
     #[test]
     fn test_like_pattern_matching() {
-        let query = SelectQuery::parse("SELECT * FROM users").unwrap();
-
         // Test prefix pattern 'f%'
-        assert!(query.value_like(
+        assert!(SelectQuery::value_like(
             &Value::Text("foo".to_string()),
             &Value::Text("f%".to_string())
         ));
-        assert!(query.value_like(
+        assert!(SelectQuery::value_like(
             &Value::Text("ff736190-1479-4681-b9b2-78757cd55821".to_string()),
             &Value::Text("f%".to_string())
         ));
-        assert!(query.value_like(
+        assert!(SelectQuery::value_like(
             &Value::Text("fa18fc4d-11dc-466b-84cd-d6793ff93774".to_string()),
             &Value::Text("f%".to_string())
         ));
-        assert!(!query.value_like(
+        assert!(!SelectQuery::value_like(
             &Value::Text("bar".to_string()),
             &Value::Text("f%".to_string())
         ));
 
         // Test suffix pattern '%bar'
-        assert!(query.value_like(
+        assert!(SelectQuery::value_like(
             &Value::Text("foobar".to_string()),
             &Value::Text("%bar".to_string())
         ));
-        assert!(!query.value_like(
+        assert!(!SelectQuery::value_like(
             &Value::Text("foo".to_string()),
             &Value::Text("%bar".to_string())
         ));
 
         // Test contains pattern '%middle%'
-        assert!(query.value_like(
+        assert!(SelectQuery::value_like(
             &Value::Text("foo middle bar".to_string()),
             &Value::Text("%middle%".to_string())
         ));
-        assert!(!query.value_like(
+        assert!(!SelectQuery::value_like(
             &Value::Text("foo bar".to_string()),
             &Value::Text("%middle%".to_string())
         ));
 
         // Test exact match (no wildcards)
-        assert!(query.value_like(
+        assert!(SelectQuery::value_like(
             &Value::Text("exact".to_string()),
             &Value::Text("exact".to_string())
         ));
-        assert!(!query.value_like(
+        assert!(!SelectQuery::value_like(
             &Value::Text("different".to_string()),
             &Value::Text("exact".to_string())
         ));
@@ -976,7 +976,6 @@ mod tests {
 
     #[test]
     fn test_between_evaluation() {
-        let query = SelectQuery::parse("SELECT * FROM users").unwrap();
         let mut row = std::collections::HashMap::new();
 
         // Test integer BETWEEN
@@ -986,22 +985,22 @@ mod tests {
             low: Value::Integer(18),
             high: Value::Integer(65),
         };
-        assert!(query.evaluate_expr(&row, &expr));
+        assert!(SelectQuery::evaluate_expr(&row, &expr));
 
         // Test value outside range (too low)
         row.insert("age".to_string(), Value::Integer(15));
-        assert!(!query.evaluate_expr(&row, &expr));
+        assert!(!SelectQuery::evaluate_expr(&row, &expr));
 
         // Test value outside range (too high)
         row.insert("age".to_string(), Value::Integer(70));
-        assert!(!query.evaluate_expr(&row, &expr));
+        assert!(!SelectQuery::evaluate_expr(&row, &expr));
 
         // Test boundary values
         row.insert("age".to_string(), Value::Integer(18));
-        assert!(query.evaluate_expr(&row, &expr));
+        assert!(SelectQuery::evaluate_expr(&row, &expr));
 
         row.insert("age".to_string(), Value::Integer(65));
-        assert!(query.evaluate_expr(&row, &expr));
+        assert!(SelectQuery::evaluate_expr(&row, &expr));
 
         // Test float BETWEEN
         row.insert("score".to_string(), Value::Real(85.5));
@@ -1010,11 +1009,11 @@ mod tests {
             low: Value::Real(80.0),
             high: Value::Real(90.0),
         };
-        assert!(query.evaluate_expr(&row, &expr));
+        assert!(SelectQuery::evaluate_expr(&row, &expr));
 
         // Test mixed types (integer value, real bounds)
         row.insert("score".to_string(), Value::Integer(85));
-        assert!(query.evaluate_expr(&row, &expr));
+        assert!(SelectQuery::evaluate_expr(&row, &expr));
     }
 
     #[test]

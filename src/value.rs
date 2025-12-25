@@ -26,60 +26,22 @@ pub enum Value {
 impl Eq for Value {}
 
 // Manual implementation of PartialOrd to handle NaN values robustly
+// Delegates to Ord to ensure consistency and fix the lint
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match (self, other) {
-            (Self::Real(a), Self::Real(b)) => {
-                // Handle NaN values deterministically
-                if a.is_nan() && b.is_nan() {
-                    Some(std::cmp::Ordering::Equal)
-                } else if a.is_nan() {
-                    Some(std::cmp::Ordering::Less)
-                } else if b.is_nan() {
-                    Some(std::cmp::Ordering::Greater)
-                } else {
-                    a.partial_cmp(b)
-                }
-            }
-            _ => {
-                // For non-Real values, use the standard comparison
-                match (self, other) {
-                    (Self::Null, Self::Null) => Some(std::cmp::Ordering::Equal),
-                    (Self::Null, _) => Some(std::cmp::Ordering::Less),
-                    (_, Self::Null) => Some(std::cmp::Ordering::Greater),
-                    (Self::Integer(a), Self::Integer(b)) => Some(a.cmp(b)),
-                    (Self::Integer(a), Self::Real(b)) => {
-                        if b.is_nan() {
-                            Some(std::cmp::Ordering::Greater)
-                        } else {
-                            (*a as f64).partial_cmp(b)
-                        }
-                    }
-                    (Self::Real(a), Self::Integer(b)) => {
-                        if a.is_nan() {
-                            Some(std::cmp::Ordering::Less)
-                        } else {
-                            a.partial_cmp(&(*b as f64))
-                        }
-                    }
-                    (Self::Text(a), Self::Text(b)) => Some(a.cmp(b)),
-                    (Self::Blob(a), Self::Blob(b)) => Some(a.cmp(b)),
-                    _ => None, // Different types are not comparable
-                }
-            }
-        }
+        Some(self.cmp(other))
     }
 }
 
 impl Value {
     /// Returns true if this value is NULL
-    #[must_use] 
+    #[must_use]
     pub const fn is_null(&self) -> bool {
         matches!(self, Self::Null)
     }
 
     /// Try to get this value as an integer
-    #[must_use] 
+    #[must_use]
     pub const fn as_integer(&self) -> Option<i64> {
         match self {
             Self::Integer(i) => Some(*i),
@@ -88,17 +50,18 @@ impl Value {
     }
 
     /// Try to get this value as a float
-    #[must_use] 
+    #[must_use]
     pub const fn as_real(&self) -> Option<f64> {
         match self {
             Self::Real(f) => Some(*f),
+            #[allow(clippy::cast_precision_loss)]
             Self::Integer(i) => Some(*i as f64),
             _ => None,
         }
     }
 
     /// Try to get this value as text
-    #[must_use] 
+    #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(s) => Some(s),
@@ -107,7 +70,7 @@ impl Value {
     }
 
     /// Try to get this value as a blob
-    #[must_use] 
+    #[must_use]
     pub fn as_blob(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(b) => Some(b),
@@ -116,7 +79,7 @@ impl Value {
     }
 
     /// Try to get this value as a boolean
-    #[must_use] 
+    #[must_use]
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Integer(i) => Some(*i != 0),
@@ -140,7 +103,66 @@ impl core::fmt::Display for Value {
 // Manual implementation of Ord, required for B-tree key comparisons.
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        match (self, other) {
+            // --- Same Type Comparisons ---
+            (Self::Real(a), Self::Real(b)) => {
+                // Handle NaN values deterministically
+                if a.is_nan() && b.is_nan() {
+                    std::cmp::Ordering::Equal
+                } else if a.is_nan() {
+                    std::cmp::Ordering::Less
+                } else if b.is_nan() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    // Safe to unwrap because we handled NaNs
+                    a.partial_cmp(b).unwrap()
+                }
+            }
+            (Self::Integer(a), Self::Integer(b)) => a.cmp(b),
+            (Self::Text(a), Self::Text(b)) => a.cmp(b),
+            (Self::Blob(a), Self::Blob(b)) => a.cmp(b),
+            (Self::Null, Self::Null) => std::cmp::Ordering::Equal,
+
+            // --- Mixed Numeric Comparisons (Integer vs Real) ---
+            (Self::Integer(a), Self::Real(b)) => {
+                if b.is_nan() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    #[allow(clippy::cast_precision_loss)]
+                    (*a as f64)
+                        .partial_cmp(b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            }
+            (Self::Real(a), Self::Integer(b)) => {
+                if a.is_nan() {
+                    std::cmp::Ordering::Less
+                } else {
+                    #[allow(clippy::cast_precision_loss)]
+                    a.partial_cmp(&(*b as f64))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+            }
+
+            // --- Cross-Type Comparisons ---
+            // SQLite Order: Null < Numeric (Int/Real) < Text < Blob
+
+            // Cases resulting in Less:
+            // 1. Null is less than everything (except Null, handled above)
+            // 2. Numeric is less than Text and Blob
+            // 3. Text is less than Blob
+            (Self::Null, _)
+            | (Self::Integer(_) | Self::Real(_), Self::Text(_) | Self::Blob(_))
+            | (Self::Text(_), Self::Blob(_)) => std::cmp::Ordering::Less,
+
+            // Cases resulting in Greater:
+            // 1. Anything (except Null) is greater than Null
+            // 2. Text and Blob are greater than Numeric
+            // 3. Blob is greater than Text
+            (_, Self::Null)
+            | (Self::Text(_) | Self::Blob(_), Self::Integer(_) | Self::Real(_))
+            | (Self::Blob(_), Self::Text(_)) => std::cmp::Ordering::Greater,
+        }
     }
 }
 

@@ -39,9 +39,8 @@ impl Page {
         }
 
         let page_type_byte = data[header_offset];
-        let page_type = PageType::from_byte(page_type_byte).ok_or_else(|| {
-            Error::InvalidFormat(format!("Invalid page type: {page_type_byte}"))
-        })?;
+        let page_type = PageType::from_byte(page_type_byte)
+            .ok_or_else(|| Error::InvalidFormat(format!("Invalid page type: {page_type_byte}")))?;
 
         let first_cell_offset = BigEndian::read_u16(&data[header_offset + 1..]);
         let cell_count = BigEndian::read_u16(&data[header_offset + 3..]);

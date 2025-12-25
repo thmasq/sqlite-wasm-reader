@@ -52,7 +52,7 @@ pub fn parse_record_optimized(payload: &[u8]) -> Result<Vec<Value>> {
             continue;
         }
 
-        let (value, bytes_consumed) = parse_value_optimized(&payload[data_offset..], serial_type)?;
+        let (value, bytes_consumed) = parse_value_optimized(&payload[data_offset..], serial_type);
         values.push(value);
         data_offset += bytes_consumed;
     }
@@ -61,95 +61,95 @@ pub fn parse_record_optimized(payload: &[u8]) -> Result<Vec<Value>> {
 }
 
 /// Parse a single value with optimized allocations
-fn parse_value_optimized(data: &[u8], serial_type: i64) -> Result<(Value, usize)> {
+fn parse_value_optimized(data: &[u8], serial_type: i64) -> (Value, usize) {
     match serial_type {
-        0 => Ok((Value::Null, 0)),
+        0 => (Value::Null, 0),
         1 => {
             if data.is_empty() {
-                Ok((Value::Integer(0), 0))
+                (Value::Integer(0), 0)
             } else {
-                Ok((Value::Integer(i64::from(data[0] as i8)), 1))
+                (Value::Integer(i64::from(data[0] as i8)), 1)
             }
         }
         2 => {
             if data.len() < 2 {
-                Ok((Value::Integer(0), 0))
+                (Value::Integer(0), 0)
             } else {
                 let value = i64::from(BigEndian::read_i16(data));
-                Ok((Value::Integer(value), 2))
+                (Value::Integer(value), 2)
             }
         }
         3 => {
             if data.len() < 3 {
-                Ok((Value::Integer(0), 0))
+                (Value::Integer(0), 0)
             } else {
                 let mut bytes = [0u8; 4];
                 bytes[1..4].copy_from_slice(&data[0..3]);
                 let value = BigEndian::read_i32(&bytes) >> 8; // Sign extend
-                Ok((Value::Integer(i64::from(value)), 3))
+                (Value::Integer(i64::from(value)), 3)
             }
         }
         4 => {
             if data.len() < 4 {
-                Ok((Value::Integer(0), 0))
+                (Value::Integer(0), 0)
             } else {
                 let value = i64::from(BigEndian::read_i32(data));
-                Ok((Value::Integer(value), 4))
+                (Value::Integer(value), 4)
             }
         }
         5 => {
             if data.len() < 6 {
-                Ok((Value::Integer(0), 0))
+                (Value::Integer(0), 0)
             } else {
                 let mut bytes = [0u8; 8];
                 bytes[2..8].copy_from_slice(&data[0..6]);
                 let value = BigEndian::read_i64(&bytes) >> 16; // Sign extend
-                Ok((Value::Integer(value), 6))
+                (Value::Integer(value), 6)
             }
         }
         6 => {
             if data.len() < 8 {
-                Ok((Value::Integer(0), 0))
+                (Value::Integer(0), 0)
             } else {
                 let value = BigEndian::read_i64(data);
-                Ok((Value::Integer(value), 8))
+                (Value::Integer(value), 8)
             }
         }
         7 => {
             if data.len() < 8 {
-                Ok((Value::Real(0.0), 0))
+                (Value::Real(0.0), 0)
             } else {
                 let bits = BigEndian::read_u64(data);
                 let value = f64::from_bits(bits);
-                Ok((Value::Real(value), 8))
+                (Value::Real(value), 8)
             }
         }
-        8 => Ok((Value::Integer(0), 0)),
-        9 => Ok((Value::Integer(1), 0)),
+        8 => (Value::Integer(0), 0),
+        9 => (Value::Integer(1), 0),
         _ => {
             if serial_type >= 12 {
                 if serial_type % 2 == 0 {
                     // BLOB
                     let length = ((serial_type - 12) / 2) as usize;
                     if data.len() < length {
-                        Ok((Value::Blob(Vec::new()), 0))
+                        (Value::Blob(Vec::new()), 0)
                     } else {
                         // Use from_slice to avoid unnecessary allocation
-                        Ok((Value::Blob(data[0..length].to_vec()), length))
+                        (Value::Blob(data[0..length].to_vec()), length)
                     }
                 } else {
                     // TEXT
                     let length = ((serial_type - 13) / 2) as usize;
                     if data.len() < length {
-                        Ok((Value::Text(String::new()), 0))
+                        (Value::Text(String::new()), 0)
                     } else {
                         // Use from_utf8_lossy to handle invalid UTF-8 gracefully
                         let text = String::from_utf8_lossy(&data[0..length]).into_owned();
-                        Ok((Value::Text(text), length))
+                        (Value::Text(text), length)
                     }
                 }
             } else {
-                Ok((Value::Null, 0))
+                (Value::Null, 0)
             }
         }
     }

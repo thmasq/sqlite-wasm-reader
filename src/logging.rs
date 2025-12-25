@@ -21,13 +21,13 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// Get the default log level
-    #[must_use] 
+    #[must_use]
     pub const fn default() -> Self {
         Self::Info
     }
 
     /// Parse log level from string
-    #[must_use] 
+    #[must_use]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "error" => Some(Self::Error),
@@ -48,14 +48,14 @@ pub struct Logger {
 
 impl Logger {
     /// Create a new logger with the specified level
-    #[must_use] 
+    #[must_use]
     pub const fn new(level: LogLevel) -> Self {
         Self { level }
     }
 
     /// Create a logger with default level (Info)
-    #[must_use] 
-    pub fn default() -> Self {
+    #[must_use]
+    pub const fn default() -> Self {
         Self::new(LogLevel::default())
     }
 
@@ -65,7 +65,7 @@ impl Logger {
     }
 
     /// Get the current log level
-    #[must_use] 
+    #[must_use]
     pub const fn level(&self) -> LogLevel {
         self.level
     }
@@ -166,7 +166,7 @@ pub fn log_trace(message: &str) {
 }
 
 /// Check if a log level is enabled
-#[must_use] 
+#[must_use]
 pub fn is_enabled(level: LogLevel) -> bool {
     level <= get_logger().level()
 }

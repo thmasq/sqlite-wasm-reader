@@ -48,7 +48,7 @@ pub struct BTreeCursor {
 
 impl BTreeCursor {
     /// Create a new cursor starting at the given page
-    #[must_use] 
+    #[must_use]
     pub fn new(root_page: Page) -> Self {
         let page_number = root_page.page_number;
         Self {
