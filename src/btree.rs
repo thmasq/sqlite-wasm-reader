@@ -46,9 +46,7 @@ pub struct BTreeCursor {
     /// Stack of pages being traversed
     /// Each entry contains: (page, `current_cell_index`)
     page_stack: Vec<(Page, usize)>,
-    /// Track visited pages to prevent infinite loops
-    visited_pages: Vec<u32>,
-    /// Safety counter to prevent infinite loops
+    /// Safety counter to prevent infinite loops during traversal
     iteration_count: usize,
 }
 
@@ -56,12 +54,18 @@ impl BTreeCursor {
     /// Create a new cursor starting at the given page
     #[must_use]
     pub fn new(root_page: Page) -> Self {
-        let page_number = root_page.page_number;
         Self {
             page_stack: vec![(root_page, 0)],
-            visited_pages: vec![page_number],
             iteration_count: 0,
         }
+    }
+
+    /// Check if the given page number exists in the current stack.
+    /// This provides O(D) cycle detection where D is the tree depth.
+    fn stack_contains(&self, page_id: u32) -> bool {
+        self.page_stack
+            .iter()
+            .any(|(p, _)| p.page_number == page_id)
     }
 
     /// Find a cell with the specified key (ROWID) in the B-tree
@@ -72,6 +76,7 @@ impl BTreeCursor {
     /// - The page reader fails to read a page (e.g., I/O error).
     /// - The page data is invalid or cannot be parsed.
     /// - An interior page is missing a required right pointer.
+    /// - The tree depth exceeds the safety limit (50 levels).
     ///
     /// # Panics
     ///
@@ -87,8 +92,16 @@ impl BTreeCursor {
 
         let root_page_num = self.page_stack[0].0.page_number;
         let mut current_page = read_page(root_page_num)?;
+        let mut depth = 0;
 
         loop {
+            if depth > 50 {
+                return Err(Error::InvalidFormat(
+                    "B-tree depth exceeded safety limit during search".into(),
+                ));
+            }
+            depth += 1;
+
             let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
             if current_page.page_type.is_leaf() {
                 // Binary search for the key in this leaf page
@@ -113,8 +126,6 @@ impl BTreeCursor {
             }
 
             // This is an interior page, find the appropriate child page to descend to.
-            let cell_pointers = current_page.cell_pointers(current_page.page_number == 1)?;
-
             let mut next_page_num = current_page.right_pointer.ok_or_else(|| {
                 Error::InvalidFormat("Interior page missing right pointer".into())
             })?;
@@ -245,21 +256,26 @@ impl BTreeCursor {
         F: FnMut(u32) -> Result<Page>,
     {
         // Check if we are done with cells in this page
-        let (is_done, right_ptr) = {
+        let (is_done, right_ptr, page_num) = {
             let (page, cell_index) = self.page_stack.last_mut().unwrap();
-            (*cell_index >= page.cell_count as usize, page.right_pointer)
+            (
+                *cell_index >= page.cell_count as usize,
+                page.right_pointer,
+                page.page_number,
+            )
         };
 
         if is_done {
             // We've processed all cells in this interior page
             if let Some(right_ptr) = right_ptr {
-                // Safety check: prevent revisiting the same page
-                if self.visited_pages.contains(&right_ptr) {
+                if self.stack_contains(right_ptr) {
+                    log_warn(&format!(
+                        "Cycle detected: page {page_num} points to ancestor {right_ptr} (right ptr). Breaking cycle."
+                    ));
                     self.page_stack.pop();
                 } else {
                     match read_page(right_ptr) {
                         Ok(right_page) => {
-                            self.visited_pages.push(right_ptr);
                             self.page_stack.push((right_page, 0));
                         }
                         Err(e) => {
@@ -317,16 +333,19 @@ impl BTreeCursor {
         // Parse the interior cell and descend
         match parse_interior_table_cell(&cell_data) {
             Ok(cell) => {
-                if let Some(left_child) = cell.left_child
-                    && !self.visited_pages.contains(&left_child)
-                {
-                    match read_page(left_child) {
-                        Ok(child_page) => {
-                            self.visited_pages.push(left_child);
-                            self.page_stack.push((child_page, 0));
-                        }
-                        Err(e) => {
-                            log_warn(&format!("Failed to read child page {left_child}: {e}"));
+                if let Some(left_child) = cell.left_child {
+                    if self.stack_contains(left_child) {
+                        log_warn(&format!(
+                            "Cycle detected: page {page_number} points to ancestor {left_child} (left child). Skipping."
+                        ));
+                    } else {
+                        match read_page(left_child) {
+                            Ok(child_page) => {
+                                self.page_stack.push((child_page, 0));
+                            }
+                            Err(e) => {
+                                log_warn(&format!("Failed to read child page {left_child}: {e}"));
+                            }
                         }
                     }
                 }
@@ -361,9 +380,17 @@ impl BTreeCursor {
 
         let root_page_num = self.page_stack[0].0.page_number;
         let mut current_page = read_page(root_page_num)?;
+        let mut depth = 0;
 
         // Descend until we hit a leaf page in the index B-tree
         loop {
+            if depth > 50 {
+                return Err(Error::InvalidFormat(
+                    "B-tree depth exceeded safety limit during index search".into(),
+                ));
+            }
+            depth += 1;
+
             if current_page.page_type.is_leaf() {
                 break;
             }
