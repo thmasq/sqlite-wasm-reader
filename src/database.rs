@@ -583,8 +583,11 @@ impl<IO: Read + Seek> Database<IO> {
                     // Clear and reuse the row HashMap
                     row.clear();
 
+                    // Track value index separately
+                    let mut val_idx = 0;
+
                     // Convert to a row with column names
-                    for (i, column_name) in columns.iter().enumerate() {
+                    for column_name in &columns {
                         if let Some(ref rowid_col) = rowid_column
                             && column_name == rowid_col
                         {
@@ -593,8 +596,14 @@ impl<IO: Read + Seek> Database<IO> {
                             continue;
                         }
 
-                        let value = values.get(i).cloned().unwrap_or(Value::Null);
+                        let value = if val_idx < values.len() {
+                            values[val_idx].clone()
+                        } else {
+                            Value::Null
+                        };
+
                         row.insert(column_name.clone(), value);
+                        val_idx += 1;
                     }
 
                     // Process the row
@@ -835,7 +844,7 @@ impl<IO: Read + Seek> Database<IO> {
         let rows = if query.where_expr.is_none() && query.order_by.is_none() {
             // Fast path for simple SELECT * queries
             log_debug("Using fast table scan path");
-            self.read_table_rows_fast(table_name, query.limit)?
+            self.read_table_rows(table_name, query.limit)?
         } else {
             // Use optimized table scan for complex queries
             self.read_all_table_rows_optimized(table_name, query.limit)?
@@ -949,14 +958,6 @@ impl<IO: Read + Seek> Database<IO> {
         }
     }
 
-    /// Fast table scan for simple queries without WHERE clauses
-    fn read_table_rows_fast(&mut self, table_name: &str, limit: Option<usize>) -> Result<Vec<Row>> {
-        log_debug(&format!(
-            "Performing fast table scan for table: {table_name}"
-        ));
-        self.read_table_rows_optimized_v2(table_name, limit)
-    }
-
     /// Apply query operations (WHERE, ORDER BY, LIMIT) to a set of rows
     fn apply_query_operations(mut rows: Vec<Row>, query: &SelectQuery) -> Vec<Row> {
         // Apply WHERE clause
@@ -1009,11 +1010,7 @@ impl<IO: Read + Seek> Database<IO> {
     }
 
     /// High-performance table scan that minimizes allocations
-    fn read_table_rows_optimized_v2(
-        &mut self,
-        table_name: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<Row>> {
+    fn read_table_rows(&mut self, table_name: &str, limit: Option<usize>) -> Result<Vec<Row>> {
         log_debug(&format!(
             "Performing high-performance table scan for table: {table_name}"
         ));
@@ -1026,6 +1023,9 @@ impl<IO: Read + Seek> Database<IO> {
 
         let columns = table_info.columns.clone();
         let root_page_num = table_info.root_page;
+
+        // Detect INTEGER PRIMARY KEY column
+        let rowid_column = self.find_rowid_column(table_name)?;
 
         // Pre-allocate with estimated capacity
         let estimated_rows = limit.unwrap_or(100_000).min(100_000);
@@ -1061,18 +1061,28 @@ impl<IO: Read + Seek> Database<IO> {
 
             match cursor.next_cell(|page_num| self.read_page(page_num)) {
                 Ok(Some(cell)) => {
-                    if let Ok(values) = crate::record::parse_record(&cell.payload)
-                        && values.len() <= columns.len()
-                    {
+                    if let Ok(values) = crate::record::parse_record(&cell.payload) {
                         reusable_row.clear();
 
-                        for (i, col_name) in interned_columns.iter().enumerate() {
-                            let value = if i < values.len() {
-                                values[i].clone()
+                        // Track index in the values array separately from columns
+                        let mut val_idx = 0;
+
+                        for col_name in &interned_columns {
+                            // If this column is the INTEGER PRIMARY KEY, use the cell key (rowid)
+                            if let Some(ref rowid_col) = rowid_column
+                                && col_name == rowid_col
+                            {
+                                reusable_row.insert(col_name.clone(), Value::Integer(cell.key));
                             } else {
-                                Value::Null
-                            };
-                            reusable_row.insert(col_name.clone(), value);
+                                // Otherwise consume a value from the payload
+                                let value = if val_idx < values.len() {
+                                    values[val_idx].clone()
+                                } else {
+                                    Value::Null
+                                };
+                                reusable_row.insert(col_name.clone(), value);
+                                val_idx += 1;
+                            }
                         }
 
                         rows.push(reusable_row.clone());
