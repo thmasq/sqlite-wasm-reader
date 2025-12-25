@@ -11,6 +11,8 @@ use crate::{
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use alloc::vec::Vec;
 
+const ITERATION_LIMIT: usize = 100_000_000;
+
 /// Cell in a B-tree page
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -149,7 +151,7 @@ impl BTreeCursor {
     /// # Errors
     ///
     /// Returns `Error::InvalidFormat` if the traversal exceeds the safety iteration limit
-    /// (currently 100,000), which protects against infinite loops caused by cycles in the B-tree.
+    /// (currently 100,000,000), which protects against infinite loops caused by cycles in the B-tree.
     ///
     /// # Panics
     ///
@@ -161,7 +163,7 @@ impl BTreeCursor {
     {
         // Safety check: prevent infinite loops
         self.iteration_count += 1;
-        if self.iteration_count > 100_000 {
+        if self.iteration_count > ITERATION_LIMIT {
             return Err(Error::InvalidFormat(
                 "B-tree traversal exceeded safety limit".into(),
             ));
@@ -255,107 +257,82 @@ impl BTreeCursor {
     where
         F: FnMut(u32) -> Result<Page>,
     {
-        // Check if we are done with cells in this page
-        let (is_done, right_ptr, page_num) = {
-            let (page, cell_index) = self.page_stack.last_mut().unwrap();
-            (
-                *cell_index >= page.cell_count as usize,
-                page.right_pointer,
-                page.page_number,
-            )
-        };
+        let (page, cell_index) = self.page_stack.last_mut().unwrap();
+        let cell_count = page.cell_count as usize;
+        let page_num = page.page_number;
+        let right_ptr = page.right_pointer;
+        let is_first_page = page_num == 1;
 
-        if is_done {
-            // We've processed all cells in this interior page
-            if let Some(right_ptr) = right_ptr {
-                if self.stack_contains(right_ptr) {
-                    log_warn(&format!(
-                        "Cycle detected: page {page_num} points to ancestor {right_ptr} (right ptr). Breaking cycle."
-                    ));
+        // State 1: Visit Left Children (Cells 0 to N-1)
+        if *cell_index < cell_count {
+            let pointers = match page.cell_pointers(is_first_page) {
+                Ok(p) => p,
+                Err(e) => {
+                    log_warn(&format!("Interior page {} error: {}", page_num, e));
                     self.page_stack.pop();
-                } else {
-                    match read_page(right_ptr) {
-                        Ok(right_page) => {
-                            self.page_stack.push((right_page, 0));
-                        }
-                        Err(e) => {
-                            log_warn(&format!("Failed to read right child {right_ptr}: {e}"));
-                            self.page_stack.pop();
+                    return;
+                }
+            };
+
+            // Should not happen if index < cell_count, but safety first
+            if *cell_index >= pointers.len() {
+                // Skip to right child processing
+                *cell_index = cell_count;
+                return;
+            }
+
+            let offset = pointers[*cell_index];
+            let cell_data = match page.cell_content(offset) {
+                Ok(d) => d.to_vec(),
+                Err(e) => {
+                    log_warn(&format!("Cell read error on page {}: {}", page_num, e));
+                    *cell_index += 1; // Skip bad cell
+                    return;
+                }
+            };
+
+            // Increment index NOW so when we return, we move to next cell
+            *cell_index += 1;
+
+            if let Ok(cell) = parse_interior_table_cell(&cell_data) {
+                if let Some(left_child) = cell.left_child {
+                    if self.stack_contains(left_child) {
+                        log_warn(&format!("Cycle detected: {} -> {}", page_num, left_child));
+                    } else {
+                        match read_page(left_child) {
+                            Ok(child_page) => self.page_stack.push((child_page, 0)),
+                            Err(e) => log_warn(&format!("Read child {} error: {}", left_child, e)),
                         }
                     }
                 }
+            }
+            return;
+        }
+
+        // State 2: Visit Right Child
+        if *cell_index == cell_count {
+            // Mark right child as processed by incrementing index
+            *cell_index += 1;
+
+            if let Some(right_ptr) = right_ptr {
+                if self.stack_contains(right_ptr) {
+                    log_warn(&format!("Cycle detected: {} -> {}", page_num, right_ptr));
+                } else {
+                    match read_page(right_ptr) {
+                        Ok(child_page) => self.page_stack.push((child_page, 0)),
+                        Err(e) => log_warn(&format!("Read right child {} error: {}", right_ptr, e)),
+                    }
+                }
             } else {
-                // No right pointer, pop this page
+                // No right pointer? (Shouldn't happen for valid interior pages)
                 self.page_stack.pop();
             }
             return;
         }
 
-        // Process the current cell
-        let (cell_data, page_number) = {
-            let (page, cell_index) = self.page_stack.last_mut().unwrap();
-            let is_first_page = page.page_number == 1;
-
-            let pointers = match page.cell_pointers(is_first_page) {
-                Ok(p) => p,
-                Err(e) => {
-                    log_warn(&format!(
-                        "Failed to get cell pointers for interior page {}: {}",
-                        page.page_number, e
-                    ));
-                    self.page_stack.pop();
-                    return;
-                }
-            };
-
-            if *cell_index >= pointers.len() {
-                self.page_stack.pop();
-                return;
-            }
-
-            let offset = pointers[*cell_index];
-            let data = match page.cell_content(offset) {
-                Ok(d) => d.to_vec(),
-                Err(e) => {
-                    log_warn(&format!(
-                        "Failed to get cell content at offset {} on interior page {}: {}",
-                        offset, page.page_number, e
-                    ));
-                    *cell_index += 1;
-                    return;
-                }
-            };
-
-            *cell_index += 1;
-            (data, page.page_number)
-        };
-
-        // Parse the interior cell and descend
-        match parse_interior_table_cell(&cell_data) {
-            Ok(cell) => {
-                if let Some(left_child) = cell.left_child {
-                    if self.stack_contains(left_child) {
-                        log_warn(&format!(
-                            "Cycle detected: page {page_number} points to ancestor {left_child} (left child). Skipping."
-                        ));
-                    } else {
-                        match read_page(left_child) {
-                            Ok(child_page) => {
-                                self.page_stack.push((child_page, 0));
-                            }
-                            Err(e) => {
-                                log_warn(&format!("Failed to read child page {left_child}: {e}"));
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log_warn(&format!(
-                    "Failed to parse interior cell on page {page_number}: {e}"
-                ));
-            }
-        }
+        // State 3: Done
+        // We have visited all cells and the right pointer. Pop self.
+        self.page_stack.pop();
     }
 
     /// Find all rowids for a composite index key (exact match on all components).

@@ -22,8 +22,8 @@ use crate::{
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use alloc::{format, string::String, vec::Vec};
 
-const MAX_ROWS: usize = 1_000_000;
-const MAX_ITERATIONS: usize = 10_000_000;
+const MAX_ROWS: usize = 100_000_000;
+const MAX_ITERATIONS: usize = 100_000_000;
 const BATCH_SIZE: usize = 1000;
 
 /// A row of data from a table
@@ -116,13 +116,14 @@ impl<IO: Read + Seek> Database<IO> {
         // First pass: process tables
         for (name, object) in &schema_objects {
             if object.type_name == "table" && !name.starts_with("sqlite_") {
+                // Try strict parsing first, then fallback to simple text parsing
                 let columns = match Self::parse_create_table_columns(&object.sql) {
                     Ok(cols) => cols,
                     Err(e) => {
                         log_warn(&format!(
-                            "Failed to parse CREATE TABLE statement for table '{name}': {e}"
+                            "Strict SQL parse failed for '{name}': {e}. Trying fallback parser."
                         ));
-                        continue;
+                        Self::fallback_parse_columns(&object.sql)
                     }
                 };
 
@@ -194,6 +195,38 @@ impl<IO: Read + Seek> Database<IO> {
         }
     }
 
+    /// Fallback parser for when sqlparser fails (e.g. non-standard quoting or types)
+    fn fallback_parse_columns(sql: &str) -> Vec<String> {
+        let mut columns = Vec::new();
+        // Find content inside the first pair of parentheses
+        if let (Some(start), Some(end)) = (sql.find('('), sql.rfind(')')) {
+            if start < end {
+                let content = &sql[start + 1..end];
+                // Naive split by comma (doesn't handle commas inside definitions, but works for simple schemas)
+                for segment in content.split(',') {
+                    let segment = segment.trim();
+                    if segment.is_empty() {
+                        continue;
+                    }
+
+                    // The first word is usually the column name
+                    if let Some(first_word) = segment.split_whitespace().next() {
+                        // Strip quotes: "Id", 'Id', [Id], `Id`
+                        let cleaned = first_word.trim_matches(|c| {
+                            c == '"' || c == '\'' || c == '`' || c == '[' || c == ']'
+                        });
+                        columns.push(cleaned.to_string());
+                    }
+                }
+            }
+        }
+        // If fallback failed completely, return a default column to allow raw access
+        if columns.is_empty() {
+            columns.push("unknown_col".to_string());
+        }
+        columns
+    }
+
     /// Parse a CREATE INDEX statement to extract the target table and column names
     /// This routine uses simple string parsing instead of relying on the full SQL parser
     /// because sqlparser's `CreateIndex` support is experimental and may break between versions.
@@ -225,6 +258,12 @@ impl<IO: Read + Seek> Database<IO> {
             }
             table_name.push(ch);
         }
+
+        // Clean table name quotes
+        let table_name = table_name
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string();
+
         if table_name.is_empty() {
             return Err(Error::SchemaError(
                 "Unable to parse table name from CREATE INDEX".into(),
@@ -243,7 +282,11 @@ impl<IO: Read + Seek> Database<IO> {
 
         let columns: Vec<String> = cols_segment
             .split(',')
-            .map(|s| s.trim().trim_matches('`').trim_matches('"').to_string())
+            .map(|s| {
+                s.trim()
+                    .trim_matches(|c| c == '`' || c == '"' || c == '\'')
+                    .to_string()
+            })
             .filter(|s| !s.is_empty())
             .collect();
 
@@ -320,17 +363,8 @@ impl<IO: Read + Seek> Database<IO> {
     /// - The schema table contains invalid data.
     ///
     pub fn tables(&mut self) -> Result<Vec<String>> {
-        let schema = self.read_schema()?;
-        Ok(schema
-            .into_iter()
-            .filter_map(|(name, info)| {
-                if info.type_name == "table" && !name.starts_with("sqlite_") {
-                    Some(name)
-                } else {
-                    None
-                }
-            })
-            .collect())
+        // Return keys from schema cache to ensure consistency with execute_query
+        Ok(self.schema_cache.keys().cloned().collect())
     }
 
     /// Count rows in a table efficiently without reading all data
@@ -343,9 +377,9 @@ impl<IO: Read + Seek> Database<IO> {
     /// - The database file format is invalid.
     ///
     pub fn count_table_rows(&mut self, table_name: &str) -> Result<usize> {
-        let schema = self.read_schema()?;
-
-        let table_info = schema
+        // Use cache instead of re-reading schema
+        let table_info = self
+            .schema_cache
             .get(table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
 
@@ -362,12 +396,11 @@ impl<IO: Read + Seek> Database<IO> {
         let mut row_count = 0;
 
         // Safety check: limit number of iterations to prevent infinite loops
-        let max_iterations = 1_000_000;
         let mut iteration_count = 0;
 
         while let Some(cell) = cursor.next_cell(|page_num| self.read_page(page_num))? {
             iteration_count += 1;
-            if iteration_count > max_iterations {
+            if iteration_count > MAX_ITERATIONS {
                 log_warn(&format!(
                     "Row counting exceeded safety limit, stopping at {row_count} rows"
                 ));

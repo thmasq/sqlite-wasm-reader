@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SQLite WASM Inspector</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        #output { white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 5px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>SQLite WASM Inspector</h1>
+    <p>Select a .db or .sqlite file to inspect it entirely in your browser.</p>
+    
+    <input type="file" id="fileInput" accept=".db,.sqlite,.sqlite3">
+    
+    <div id="output">Results will appear here...</div>
+
+    <script type="module">
+        // Import the init function and the inspect_db function from the generated pkg
+        import init, { inspect_db } from './pkg/sqlite_browser_inspector.js';
+
+        async function run() {
+            // Initialize the WASM module
+            await init();
+
+            const fileInput = document.getElementById('fileInput');
+            const output = document.getElementById('output');
+
+            fileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                output.textContent = "Reading file...";
+
+                const reader = new FileReader();
+                reader.onload = function() {
+                    try {
+                        // Convert ArrayBuffer to Uint8Array (compatible with Rust &[u8])
+                        const data = new Uint8Array(reader.result);
+                        
+                        // Call the exported Rust function
+                        const result = inspect_db(data);
+                        
+                        output.textContent = result;
+                    } catch (err) {
+                        output.textContent = "Error: " + err;
+                        console.error(err);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        run();
+    </script>
+</body>
+</html>

@@ -37,14 +37,8 @@
 //! }
 //! ```
 
-// Only use no_std for non-WASI WebAssembly targets
-#![cfg_attr(all(target_arch = "wasm32", not(target_os = "wasi")), no_std)]
-
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 extern crate alloc;
-
-#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-use alloc::{format, string::String, vec::Vec};
 
 pub mod btree;
 pub mod database;
