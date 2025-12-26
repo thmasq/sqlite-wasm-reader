@@ -32,6 +32,16 @@ const BATCH_SIZE: usize = 1000;
 /// A row of data from a table
 pub type Row = HashMap<String, Value>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PreParserState {
+    SearchTableKeyword,       // Initial state, looking for 'TABLE'
+    ExpectTableName,          // Found 'TABLE', skipping 'IF NOT EXISTS', expecting name
+    WaitForOpenParen,         // Found name, waiting for '('
+    InsideTableBody,          // Processing column/constraint definitions
+    ExpectColumnOrConstraint, // Start of a definition: expecting column name or 'CONSTRAINT'
+    ExpectConstraintName,     // Saw 'CONSTRAINT', expecting name
+}
+
 /// `SQLite` database reader
 pub struct Database<IO: Read + Seek> {
     stream: IO,
@@ -134,7 +144,7 @@ impl<IO: Read + Seek> Database<IO> {
                     Err(e) => {
                         log_warn(&format!("Skipping table '{name}' due to invalid SQL: {e}"));
                     }
-                };
+                }
             }
         }
 
@@ -178,18 +188,7 @@ impl<IO: Read + Seek> Database<IO> {
             .tokenize()
             .map_err(|e| Error::SchemaError(format!("Tokenizer error: {e}")))?;
 
-        // 2. State Machine definitions
-        #[derive(Debug, Clone, Copy, PartialEq)]
-        enum State {
-            SearchTableKeyword,       // Initial state, looking for 'TABLE'
-            ExpectTableName,          // Found 'TABLE', skipping 'IF NOT EXISTS', expecting name
-            WaitForOpenParen,         // Found name, waiting for '('
-            InsideTableBody,          // Processing column/constraint definitions
-            ExpectColumnOrConstraint, // Start of a definition: expecting column name or 'CONSTRAINT'
-            ExpectConstraintName,     // Saw 'CONSTRAINT', expecting name
-        }
-
-        let mut state = State::SearchTableKeyword;
+        let mut state = PreParserState::SearchTableKeyword;
         let mut depth = 0;
 
         for token in &mut tokens {
@@ -197,21 +196,21 @@ impl<IO: Read + Seek> Database<IO> {
                 Token::Whitespace(_) => continue,
                 Token::LParen => {
                     depth += 1;
-                    if depth == 1 && state == State::WaitForOpenParen {
-                        state = State::ExpectColumnOrConstraint;
+                    if depth == 1 && state == PreParserState::WaitForOpenParen {
+                        state = PreParserState::ExpectColumnOrConstraint;
                     }
                     continue;
                 }
                 Token::RParen => {
                     depth -= 1;
                     if depth == 0 {
-                        state = State::SearchTableKeyword;
+                        state = PreParserState::SearchTableKeyword;
                     }
                     continue;
                 }
                 Token::Comma => {
                     if depth == 1 {
-                        state = State::ExpectColumnOrConstraint;
+                        state = PreParserState::ExpectColumnOrConstraint;
                     }
                     continue;
                 }
@@ -219,20 +218,20 @@ impl<IO: Read + Seek> Database<IO> {
             }
 
             match state {
-                State::SearchTableKeyword => {
-                    if let Token::Word(w) = token {
-                        if w.value.eq_ignore_ascii_case("TABLE") {
-                            state = State::ExpectTableName;
-                        }
+                PreParserState::SearchTableKeyword => {
+                    if let Token::Word(w) = token
+                        && w.value.eq_ignore_ascii_case("TABLE")
+                    {
+                        state = PreParserState::ExpectTableName;
                     }
                 }
-                State::ExpectTableName => match token {
+                PreParserState::ExpectTableName => match token {
                     Token::Word(w) => {
                         let s = w.value.to_uppercase();
                         if s == "IF" || s == "NOT" || s == "EXISTS" {
                             continue;
                         }
-                        state = State::WaitForOpenParen;
+                        state = PreParserState::WaitForOpenParen;
                     }
                     Token::SingleQuotedString(s) => {
                         *token = Token::Word(tokenizer::Word {
@@ -240,20 +239,16 @@ impl<IO: Read + Seek> Database<IO> {
                             quote_style: Some('"'),
                             keyword: Keyword::NoKeyword,
                         });
-                        state = State::WaitForOpenParen;
+                        state = PreParserState::WaitForOpenParen;
                     }
                     _ => {}
                 },
-                State::ExpectColumnOrConstraint => match token {
+                PreParserState::ExpectColumnOrConstraint => match token {
                     Token::Word(w) => {
                         if w.value.eq_ignore_ascii_case("CONSTRAINT") {
-                            state = State::ExpectConstraintName;
-                        } else if ["PRIMARY", "FOREIGN", "CHECK", "UNIQUE"]
-                            .contains(&w.value.to_uppercase().as_str())
-                        {
-                            state = State::InsideTableBody;
+                            state = PreParserState::ExpectConstraintName;
                         } else {
-                            state = State::InsideTableBody;
+                            state = PreParserState::InsideTableBody;
                         }
                     }
                     Token::SingleQuotedString(s) => {
@@ -262,11 +257,11 @@ impl<IO: Read + Seek> Database<IO> {
                             quote_style: Some('"'),
                             keyword: Keyword::NoKeyword,
                         });
-                        state = State::InsideTableBody;
+                        state = PreParserState::InsideTableBody;
                     }
                     _ => {}
                 },
-                State::ExpectConstraintName => {
+                PreParserState::ExpectConstraintName => {
                     if let Token::SingleQuotedString(s) = token {
                         *token = Token::Word(tokenizer::Word {
                             value: s.clone(),
@@ -274,7 +269,7 @@ impl<IO: Read + Seek> Database<IO> {
                             keyword: Keyword::NoKeyword,
                         });
                     }
-                    state = State::InsideTableBody;
+                    state = PreParserState::InsideTableBody;
                 }
                 _ => {} // InsideTableBody or WaitForOpenParen waiting for punctuation
             }
@@ -339,7 +334,7 @@ impl<IO: Read + Seek> Database<IO> {
                     // Extract value from Identifier variant
                     sqlparser::ast::ObjectNamePart::Identifier(ident) => ident.value.clone(),
                     // Fallback for other variants (e.g. Function)
-                    _ => part.to_string(),
+                    sqlparser::ast::ObjectNamePart::Function(_) => part.to_string(),
                 })
                 .collect::<Vec<String>>()
                 .join(".");
@@ -1322,7 +1317,7 @@ mod tests {
             'UserId' INTEGER,
             CONSTRAINT 'PK_Orders' PRIMARY KEY ('Id')
         )";
-        let (cols, rowid) = test_parse(sql);
+        let (cols, _rowid) = test_parse(sql);
 
         assert_eq!(cols, vec!["Id", "UserId"]);
         // Note: rowid might be None here depending on strict INTEGER PRIMARY KEY detection logic
