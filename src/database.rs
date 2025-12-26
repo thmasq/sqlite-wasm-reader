@@ -199,24 +199,24 @@ impl<IO: Read + Seek> Database<IO> {
     fn fallback_parse_columns(sql: &str) -> Vec<String> {
         let mut columns = Vec::new();
         // Find content inside the first pair of parentheses
-        if let (Some(start), Some(end)) = (sql.find('('), sql.rfind(')')) {
-            if start < end {
-                let content = &sql[start + 1..end];
-                // Naive split by comma (doesn't handle commas inside definitions, but works for simple schemas)
-                for segment in content.split(',') {
-                    let segment = segment.trim();
-                    if segment.is_empty() {
-                        continue;
-                    }
+        if let (Some(start), Some(end)) = (sql.find('('), sql.rfind(')'))
+            && start < end
+        {
+            let content = &sql[start + 1..end];
+            // Naive split by comma (doesn't handle commas inside definitions, but works for simple schemas)
+            for segment in content.split(',') {
+                let segment = segment.trim();
+                if segment.is_empty() {
+                    continue;
+                }
 
-                    // The first word is usually the column name
-                    if let Some(first_word) = segment.split_whitespace().next() {
-                        // Strip quotes: "Id", 'Id', [Id], `Id`
-                        let cleaned = first_word.trim_matches(|c| {
-                            c == '"' || c == '\'' || c == '`' || c == '[' || c == ']'
-                        });
-                        columns.push(cleaned.to_string());
-                    }
+                // The first word is usually the column name
+                if let Some(first_word) = segment.split_whitespace().next() {
+                    // Strip quotes: "Id", 'Id', [Id], `Id`
+                    let cleaned = first_word.trim_matches(|c| {
+                        c == '"' || c == '\'' || c == '`' || c == '[' || c == ']'
+                    });
+                    columns.push(cleaned.to_string());
                 }
             }
         }

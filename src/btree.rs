@@ -257,7 +257,7 @@ impl<'a> BTreeCursor<'a> {
                     "Failed to parse leaf cell on page {}: {}",
                     page.page_number, e
                 ));
-                return Err(e);
+                Err(e)
             }
         }
     }
@@ -278,7 +278,7 @@ impl<'a> BTreeCursor<'a> {
             let pointers = match page.cell_pointers(is_first_page) {
                 Ok(p) => p,
                 Err(e) => {
-                    log_warn(&format!("Interior page {} error: {}", page_num, e));
+                    log_warn(&format!("Interior page {page_num} error: {e}"));
                     self.page_stack.pop();
                     return;
                 }
@@ -295,7 +295,7 @@ impl<'a> BTreeCursor<'a> {
             let cell_data = match page.cell_content(offset) {
                 Ok(d) => d.to_vec(),
                 Err(e) => {
-                    log_warn(&format!("Cell read error on page {}: {}", page_num, e));
+                    log_warn(&format!("Cell read error on page {page_num}: {e}"));
                     *cell_index += 1; // Skip bad cell
                     return;
                 }
@@ -304,15 +304,15 @@ impl<'a> BTreeCursor<'a> {
             // Increment index NOW so when we return, we move to next cell
             *cell_index += 1;
 
-            if let Ok(cell) = parse_interior_table_cell(&cell_data) {
-                if let Some(left_child) = cell.left_child {
-                    if self.stack_contains(left_child) {
-                        log_warn(&format!("Cycle detected: {} -> {}", page_num, left_child));
-                    } else {
-                        match read_page(left_child) {
-                            Ok(child_page) => self.page_stack.push((child_page, 0)),
-                            Err(e) => log_warn(&format!("Read child {} error: {}", left_child, e)),
-                        }
+            if let Ok(cell) = parse_interior_table_cell(&cell_data)
+                && let Some(left_child) = cell.left_child
+            {
+                if self.stack_contains(left_child) {
+                    log_warn(&format!("Cycle detected: {page_num} -> {left_child}"));
+                } else {
+                    match read_page(left_child) {
+                        Ok(child_page) => self.page_stack.push((child_page, 0)),
+                        Err(e) => log_warn(&format!("Read child {left_child} error: {e}")),
                     }
                 }
             }
@@ -326,11 +326,11 @@ impl<'a> BTreeCursor<'a> {
 
             if let Some(right_ptr) = right_ptr {
                 if self.stack_contains(right_ptr) {
-                    log_warn(&format!("Cycle detected: {} -> {}", page_num, right_ptr));
+                    log_warn(&format!("Cycle detected: {page_num} -> {right_ptr}"));
                 } else {
                     match read_page(right_ptr) {
                         Ok(child_page) => self.page_stack.push((child_page, 0)),
-                        Err(e) => log_warn(&format!("Read right child {} error: {}", right_ptr, e)),
+                        Err(e) => log_warn(&format!("Read right child {right_ptr} error: {e}")),
                     }
                 }
             } else {
@@ -345,7 +345,34 @@ impl<'a> BTreeCursor<'a> {
         self.page_stack.pop();
     }
 
-    /// Find all rowids for a composite index key (exact match on all components).
+    /// Searches the B-tree index for row IDs associated with the specified composite key.
+    ///
+    /// This method traverses the B-tree starting from the root, descending through interior pages
+    /// until it reaches the appropriate leaf page. It then scans the leaf page for cells
+    /// that match the provided `key`.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - A slice of `Value` references representing the composite key to search for.
+    /// * `read_page` - A closure that takes a page number (`u32`) and returns a `Result<Page>`.
+    ///   This is used to load pages from the database file as needed.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `Result` containing a `Vec<i64>` of row IDs that match the given key.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error in the following situations:
+    ///
+    /// * **Depth Limit Exceeded**: If the B-tree traversal depth exceeds 50 levels, `Error::InvalidFormat`
+    ///   is returned. This acts as a safety guard against infinite loops caused by corrupted tree structures.
+    /// * **Corrupted Structure**: If an interior index page is encountered that is missing its right pointer,
+    ///   `Error::InvalidFormat` is returned.
+    /// * **Parsing Failures**: If the cell pointers or cell content (such as header lengths or key payloads)
+    ///   cannot be parsed successfully, an error is returned.
+    /// * **Page Retrieval Errors**: If the provided `read_page` closure returns an error (e.g., failing to
+    ///   read bytes from the underlying source), that error is propagated immediately.
     pub fn find_rowids_by_key<F>(&mut self, key: &[&Value], mut read_page: F) -> Result<Vec<i64>>
     where
         F: FnMut(u32) -> Result<Page>,
@@ -419,10 +446,10 @@ impl<'a> BTreeCursor<'a> {
                 rowids.push(cell.rowid);
             } else {
                 // Check if we've passed the search key alphabetically
-                if let (Some(search_first), Some(cell_first)) = (key.first(), cell.key.first()) {
-                    if let std::cmp::Ordering::Greater = cell_first.cmp(search_first) {
-                        break;
-                    }
+                if let (Some(search_first), Some(cell_first)) = (key.first(), cell.key.first())
+                    && cell_first.cmp(search_first) == std::cmp::Ordering::Greater
+                {
+                    break;
                 }
             }
         }
@@ -474,8 +501,7 @@ where
 
     if payload_size > max_local as u64 {
         crate::logging::log_debug(&format!(
-            "Overflow detected! Payload size: {}, Max local: {}, Local size: {}",
-            payload_size, max_local, local_size
+            "Overflow detected! Payload size: {payload_size}, Max local: {max_local}, Local size: {local_size}"
         ));
     }
 
@@ -510,7 +536,7 @@ where
             initial_data[offset + 3],
         ]);
 
-        crate::logging::log_debug(&format!("First overflow page pointer: {}", next_page_num));
+        crate::logging::log_debug(&format!("First overflow page pointer: {next_page_num}"));
 
         let mut bytes_read = local_size;
         let overflow_payload_capacity = usable_space - OVERFLOW_PAGE_HEADER_SIZE; // usually 4096 - 4 = 4092
@@ -522,7 +548,7 @@ where
                 ));
             }
 
-            crate::logging::log_debug(&format!("Fetching overflow page: {}", next_page_num));
+            crate::logging::log_debug(&format!("Fetching overflow page: {next_page_num}"));
 
             let page = read_page(next_page_num)?;
 

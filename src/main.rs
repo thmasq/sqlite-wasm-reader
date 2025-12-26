@@ -7,7 +7,7 @@ fn main() -> Result<(), Error> {
     let db_path = "./ExcelDB.db";
 
     if !Path::new(db_path).exists() {
-        eprintln!("Error: Database file '{}' not found.", db_path);
+        eprintln!("Error: Database file '{db_path}' not found.");
         std::process::exit(1);
     }
 
@@ -15,7 +15,7 @@ fn main() -> Result<(), Error> {
     set_log_level(LogLevel::Debug);
 
     println!("=== ExcelDB.db Reader ===");
-    println!("Opening database: {}", db_path);
+    println!("Opening database: {db_path}");
 
     let mut db = Database::open(db_path)?;
 
@@ -30,16 +30,16 @@ fn main() -> Result<(), Error> {
 
     for table_name in tables {
         println!("\n------------------------------------------------");
-        println!("Table: {}", table_name);
+        println!("Table: {table_name}");
 
         match db.count_table_rows(&table_name) {
-            Ok(count) => println!("Total Rows: {}", count),
-            Err(e) => println!("Error counting rows: {}", e),
+            Ok(count) => println!("Total Rows: {count}"),
+            Err(e) => println!("Error counting rows: {e}"),
         }
 
         match db.get_table_columns(&table_name) {
             Ok(cols) => println!("Columns: {}", cols.join(", ")),
-            Err(e) => println!("Error getting columns: {}", e),
+            Err(e) => println!("Error getting columns: {e}"),
         }
 
         println!("Sample Data (First 5 rows):");
@@ -59,7 +59,7 @@ fn main() -> Result<(), Error> {
                     }
                 }
             }
-            Err(e) => println!("  Error querying data: {}", e),
+            Err(e) => println!("  Error querying data: {e}"),
         }
     }
 
@@ -72,7 +72,7 @@ fn format_value(value: &Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Integer(i) => i.to_string(),
         Value::Real(f) => f.to_string(),
-        Value::Text(s) => format!("\"{}\"", s),
+        Value::Text(s) => format!("\"{s}\""),
         Value::Blob(b) => format!("<BLOB {} bytes>", b.len()),
     }
 }

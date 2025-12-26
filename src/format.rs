@@ -62,7 +62,7 @@ pub struct FileHeader {
 
 impl FileHeader {
     /// Calculate the usable space on a page (U)
-    /// U = page_size - reserved_space
+    /// U = `page_size` - `reserved_space`
     #[must_use]
     pub fn usable_space(&self) -> u32 {
         self.page_size - u32::from(self.reserved_space)
