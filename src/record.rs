@@ -90,8 +90,11 @@ pub fn parse_value(serial_type: i64, data: &[u8]) -> (Value, usize) {
                 (Value::Integer(0), 0)
             } else {
                 let mut bytes = [0u8; 4];
+                if (data[0] & 0x80) != 0 {
+                    bytes[0] = 0xff;
+                }
                 bytes[1..4].copy_from_slice(&data[0..3]);
-                let value = BigEndian::read_i32(&bytes) >> 8; // Sign extend
+                let value = BigEndian::read_i32(&bytes);
                 (Value::Integer(i64::from(value)), 3)
             }
         }
@@ -108,8 +111,12 @@ pub fn parse_value(serial_type: i64, data: &[u8]) -> (Value, usize) {
                 (Value::Integer(0), 0)
             } else {
                 let mut bytes = [0u8; 8];
+                if (data[0] & 0x80) != 0 {
+                    bytes[0] = 0xff;
+                    bytes[1] = 0xff;
+                }
                 bytes[2..8].copy_from_slice(&data[0..6]);
-                let value = BigEndian::read_i64(&bytes) >> 16; // Sign extend
+                let value = BigEndian::read_i64(&bytes);
                 (Value::Integer(value), 6)
             }
         }
