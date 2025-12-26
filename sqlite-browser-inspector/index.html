@@ -2,56 +2,278 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>SQLite WASM Inspector</title>
+    <title>SQLite Virtual Excel View</title>
     <style>
-        body { font-family: monospace; padding: 20px; }
-        #output { white-space: pre-wrap; background: #f4f4f4; padding: 10px; border-radius: 5px; margin-top: 20px; }
+        /* --- LAYOUT FIXES --- */
+        html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f0f2f5; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; }
+
+        .controls { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; flex-shrink: 0; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        select { padding: 8px; min-width: 200px; border: 1px solid #ccc; border-radius: 4px; }
+        
+        #viewport { flex-grow: 1; overflow: auto; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); position: relative; border: 1px solid #dee2e6; }
+
+        table { border-collapse: collapse; table-layout: fixed; width: 100%; position: absolute; top: 0; left: 0; }
+        th, td { border-right: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; padding: 0 8px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 30px; box-sizing: border-box; font-size: 13px; }
+        
+        thead { position: sticky; top: 0; z-index: 2; background: #f8f9fa; display: block; }
+        thead tr { display: flex; }
+        thead th { flex: 1; border-bottom: 2px solid #ccc; display: flex; align-items: center; font-weight: 600; color: #444; }
+        
+        tbody tr { display: flex; background: white; }
+        tbody td { flex: 1; display: flex; align-items: center; }
+        tbody tr:hover { background-color: #e8f0fe; }
+
+        .type-null { color: #aaa; font-style: italic; }
+        .type-number { justify-content: flex-end; color: #1a73e8; font-variant-numeric: tabular-nums; }
+        .col-index { width: 60px !important; flex: none !important; color: #999; justify-content: center; background: #fcfcfc; border-right: 2px solid #e0e0e0; user-select: none; }
+
+        /* --- MODAL STYLES --- */
+        #searchModal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.2); align-items: flex-start; justify-content: center; padding-top: 80px; }
+        #searchModalContent { background-color: #fff; padding: 15px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); width: 400px; display: flex; flex-direction: column; gap: 10px; animation: slideDown 0.2s ease-out; }
+        @keyframes slideDown { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+        .modal-title { font-weight: 600; color: #333; }
+        .modal-hint { font-size: 12px; color: #888; background: #f0f0f0; padding: 2px 6px; border-radius: 4px; }
+        #modalSearchInput { padding: 10px; font-size: 16px; border: 2px solid #1a73e8; border-radius: 6px; width: 100%; box-sizing: border-box; outline: none; }
+        .modal-footer { display: flex; justify-content: space-between; font-size: 13px; color: #666; margin-top: 5px; }
     </style>
 </head>
 <body>
-    <h1>SQLite WASM Inspector</h1>
-    <p>Select a .db or .sqlite file to inspect it entirely in your browser.</p>
+    <div class="controls">
+        <input type="file" id="fileInput" accept=".db,.sqlite,.sqlite3" style="flex-grow: 0">
+        <select id="tableSelect" style="display:none"></select>
+        <span id="status" style="white-space: nowrap; margin-left: auto; color: #666;"></span>
+        <button id="searchBtn" style="display:none; padding: 6px 12px; cursor: pointer;">Find</button>
+    </div>
     
-    <input type="file" id="fileInput" accept=".db,.sqlite,.sqlite3">
-    
-    <div id="output">Results will appear here...</div>
+    <div id="viewport">
+        <div id="spacer"></div>
+        <table id="grid">
+            <thead id="gridHead"></thead>
+            <tbody id="gridBody"></tbody>
+        </table>
+    </div>
+
+    <div id="searchModal">
+        <div id="searchModalContent">
+            <div class="modal-header">
+                <span class="modal-title">Find in Table</span>
+                <span class="modal-hint">ESC to close</span>
+            </div>
+            <input type="text" id="modalSearchInput" placeholder="Type to filter..." autocomplete="off">
+            <div class="modal-footer">
+                <span id="matchCount">Ready</span>
+            </div>
+        </div>
+    </div>
 
     <script type="module">
-        // Import the init function and the inspect_db function from the generated pkg
-        import init, { inspect_db } from './pkg/sqlite_browser_inspector.js';
+        import init, { Inspector } from './pkg/sqlite_browser_inspector.js';
+
+        let inspector = null;
+        const ROW_HEIGHT = 30;
+        const BUFFER = 10;
 
         async function run() {
-            // Initialize the WASM module
             await init();
 
             const fileInput = document.getElementById('fileInput');
-            const output = document.getElementById('output');
+            const tableSelect = document.getElementById('tableSelect');
+            const status = document.getElementById('status');
+            const searchBtn = document.getElementById('searchBtn');
+            
+            const viewport = document.getElementById('viewport');
+            const spacer = document.getElementById('spacer');
+            const gridBody = document.getElementById('gridBody');
+            const gridHead = document.getElementById('gridHead');
+            const grid = document.getElementById('grid');
+
+            const searchModal = document.getElementById('searchModal');
+            const modalSearchInput = document.getElementById('modalSearchInput');
+            const matchCount = document.getElementById('matchCount');
+
+            let totalRows = 0;   // Rows currently visible (may be 0 if filter matches nothing)
+            let maxRows = 0;     // Total rows in the table (unfiltered)
+            let currentCols = [];
+            let isRendering = false;
+
+            // --- Modal Logic ---
+            function openModal() {
+                // FIXED: Check maxRows (actual table size) instead of totalRows (current view size)
+                if (!inspector || maxRows === 0) return;
+                searchModal.style.display = 'flex';
+                modalSearchInput.focus();
+                modalSearchInput.select();
+            }
+
+            function closeModal() {
+                searchModal.style.display = 'none';
+                viewport.focus();
+            }
+
+            window.addEventListener('keydown', (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+                    e.preventDefault();
+                    openModal();
+                }
+                if (e.key === 'Escape') {
+                    closeModal();
+                }
+            });
+
+            searchModal.addEventListener('click', (e) => {
+                if (e.target === searchModal) closeModal();
+            });
+
+            modalSearchInput.addEventListener('input', (e) => {
+                if(!inspector) return;
+                const query = e.target.value;
+                totalRows = inspector.apply_filter(query);
+                viewport.scrollTop = 0;
+                updateLayout(totalRows);
+                
+                const text = totalRows.toLocaleString();
+                status.textContent = `${text} matches`;
+                matchCount.textContent = query === "" ? "Showing all rows" : `${text} matching rows found`;
+            });
 
             fileInput.addEventListener('change', async (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
 
-                output.textContent = "Reading file...";
-
                 const reader = new FileReader();
                 reader.onload = function() {
                     try {
-                        // Convert ArrayBuffer to Uint8Array (compatible with Rust &[u8])
-                        const data = new Uint8Array(reader.result);
+                        if (inspector) inspector.free();
+                        inspector = new Inspector(new Uint8Array(reader.result));
                         
-                        // Call the exported Rust function
-                        const result = inspect_db(data);
+                        const tables = inspector.get_tables();
+                        tableSelect.innerHTML = '<option value="" disabled selected>Select Table</option>';
+                        tables.forEach(t => {
+                            tableSelect.innerHTML += `<option value="${t}">${t}</option>`;
+                        });
                         
-                        output.textContent = result;
-                    } catch (err) {
-                        output.textContent = "Error: " + err;
-                        console.error(err);
-                    }
+                        tableSelect.style.display = 'block';
+                        status.textContent = `Loaded. ${tables.length} tables.`;
+                    } catch (err) { console.error(err); status.textContent = "Error: " + err; }
                 };
                 reader.readAsArrayBuffer(file);
             });
-        }
 
+            tableSelect.addEventListener('change', (e) => {
+                const tableName = e.target.value;
+                try {
+                    // Load table returns the total unfiltered count
+                    maxRows = inspector.load_table(tableName);
+                    totalRows = maxRows; // Initially, view shows all rows
+                    
+                    currentCols = JSON.parse(inspector.get_columns());
+                    
+                    modalSearchInput.value = "";
+                    searchBtn.style.display = 'inline-block';
+                    
+                    renderHeader(currentCols);
+                    updateLayout(totalRows);
+                    status.textContent = `${totalRows.toLocaleString()} rows`;
+                } catch (err) { status.textContent = "Error: " + err; }
+            });
+
+            searchBtn.addEventListener('click', openModal);
+
+            function updateLayout(rowsCount) {
+                spacer.style.height = `${rowsCount * ROW_HEIGHT}px`;
+                renderChunk();
+            }
+
+            viewport.addEventListener('scroll', () => {
+                if (!isRendering) {
+                    window.requestAnimationFrame(renderChunk);
+                    isRendering = true;
+                }
+            });
+
+            function renderChunk() {
+                // Allow rendering empty grid if search results are 0
+                if(totalRows === 0) { 
+                    gridBody.innerHTML = ''; 
+                    isRendering = false; 
+                    return; 
+                }
+
+                const scrollTop = viewport.scrollTop;
+                const clientHeight = viewport.clientHeight;
+                
+                const startIndex = Math.floor(scrollTop / ROW_HEIGHT);
+                const endIndex = Math.min(totalRows, Math.ceil((scrollTop + clientHeight) / ROW_HEIGHT));
+
+                const renderStart = Math.max(0, startIndex - BUFFER);
+                const renderEnd = Math.min(totalRows, endIndex + BUFFER);
+                const count = renderEnd - renderStart;
+
+                if (count <= 0) { 
+                    gridBody.innerHTML = ''; 
+                    isRendering = false; 
+                    return; 
+                }
+
+                const jsonRows = inspector.get_rows_slice(renderStart, count);
+                const rowsData = JSON.parse(jsonRows);
+
+                grid.style.transform = `translateY(${renderStart * ROW_HEIGHT}px)`;
+                
+                const fragment = document.createDocumentFragment();
+                
+                rowsData.forEach((rowData) => {
+                    const tr = document.createElement('tr');
+                    tr.style.height = `${ROW_HEIGHT}px`;
+                    
+                    const originalIndex = rowData[0]; 
+                    
+                    const tdNum = document.createElement('td');
+                    tdNum.textContent = originalIndex;
+                    tdNum.className = "col-index";
+                    tr.appendChild(tdNum);
+
+                    for(let i = 1; i < rowData.length; i++) {
+                        const cell = rowData[i];
+                        const td = document.createElement('td');
+                        if (cell === null) {
+                            td.textContent = "NULL";
+                            td.className = "type-null";
+                        } else {
+                            td.textContent = cell;
+                            if (typeof cell === 'number') td.className = "type-number";
+                        }
+                        tr.appendChild(td);
+                    }
+                    fragment.appendChild(tr);
+                });
+
+                gridBody.innerHTML = '';
+                gridBody.appendChild(fragment);
+
+                isRendering = false;
+            }
+
+            function renderHeader(cols) {
+                gridHead.innerHTML = '';
+                const tr = document.createElement('tr');
+                tr.style.height = `${ROW_HEIGHT}px`;
+                
+                const thNum = document.createElement('th');
+                thNum.textContent = "#";
+                thNum.className = "col-index";
+                tr.appendChild(thNum);
+
+                cols.forEach(c => {
+                    const th = document.createElement('th');
+                    th.textContent = c;
+                    tr.appendChild(th);
+                });
+                gridHead.appendChild(tr);
+            }
+        }
         run();
     </script>
 </body>
