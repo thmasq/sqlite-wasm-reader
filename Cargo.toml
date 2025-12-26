@@ -1,6 +1,6 @@
 [package]
 name = "sqlite_wasm_reader"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 authors = ["Thomas Q <thomasqsa@gmail.com>", "Ramanan Ravikumar <ramanan@deepfence.io>"]
 description = "A pure Rust SQLite reader library for WASI environments"

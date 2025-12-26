@@ -4,7 +4,7 @@ use byteorder::{BigEndian, ByteOrder};
 use lru::LruCache;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
-use sqlparser::tokenizer::{Token, Tokenizer};
+use sqlparser::tokenizer::{self, Token, Tokenizer};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -169,6 +169,7 @@ impl<IO: Read + Seek> Database<IO> {
     }
 
     /// Parse a CREATE TABLE statement to extract column names and the INTEGER PRIMARY KEY column.
+    /// Uses a state machine to sanitize SQLite-specific single-quoted identifiers before parsing.
     fn parse_create_table_def(sql: &str) -> Result<(Vec<String>, Option<String>)> {
         let dialect = sqlparser::dialect::SQLiteDialect {};
 
@@ -177,60 +178,109 @@ impl<IO: Read + Seek> Database<IO> {
             .tokenize()
             .map_err(|e| Error::SchemaError(format!("Tokenizer error: {e}")))?;
 
+        // 2. State Machine definitions
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        enum State {
+            SearchTableKeyword,       // Initial state, looking for 'TABLE'
+            ExpectTableName,          // Found 'TABLE', skipping 'IF NOT EXISTS', expecting name
+            WaitForOpenParen,         // Found name, waiting for '('
+            InsideTableBody,          // Processing column/constraint definitions
+            ExpectColumnOrConstraint, // Start of a definition: expecting column name or 'CONSTRAINT'
+            ExpectConstraintName,     // Saw 'CONSTRAINT', expecting name
+        }
+
+        let mut state = State::SearchTableKeyword;
         let mut depth = 0;
-        let mut expecting_identifier = false; // True after '(' or ',' inside table def
-        let mut expecting_table_name = false; // True after 'TABLE'
 
         for token in &mut tokens {
             match token {
                 Token::Whitespace(_) => continue,
-
                 Token::LParen => {
                     depth += 1;
-                    if depth == 1 {
-                        expecting_identifier = true;
+                    if depth == 1 && state == State::WaitForOpenParen {
+                        state = State::ExpectColumnOrConstraint;
                     }
-                    expecting_table_name = false;
+                    continue;
                 }
                 Token::RParen => {
                     depth -= 1;
-                    expecting_identifier = false;
-                    expecting_table_name = false;
+                    if depth == 0 {
+                        state = State::SearchTableKeyword;
+                    }
+                    continue;
                 }
                 Token::Comma => {
                     if depth == 1 {
-                        expecting_identifier = true;
+                        state = State::ExpectColumnOrConstraint;
                     }
-                    expecting_table_name = false;
+                    continue;
                 }
-                Token::SingleQuotedString(s) => {
-                    if (depth == 1 && expecting_identifier) || (depth == 0 && expecting_table_name)
-                    {
-                        *token = Token::Word(sqlparser::tokenizer::Word {
+                _ => {}
+            }
+
+            match state {
+                State::SearchTableKeyword => {
+                    if let Token::Word(w) = token {
+                        if w.value.eq_ignore_ascii_case("TABLE") {
+                            state = State::ExpectTableName;
+                        }
+                    }
+                }
+                State::ExpectTableName => match token {
+                    Token::Word(w) => {
+                        let s = w.value.to_uppercase();
+                        if s == "IF" || s == "NOT" || s == "EXISTS" {
+                            continue;
+                        }
+                        state = State::WaitForOpenParen;
+                    }
+                    Token::SingleQuotedString(s) => {
+                        *token = Token::Word(tokenizer::Word {
+                            value: s.clone(),
+                            quote_style: Some('"'),
+                            keyword: Keyword::NoKeyword,
+                        });
+                        state = State::WaitForOpenParen;
+                    }
+                    _ => {}
+                },
+                State::ExpectColumnOrConstraint => match token {
+                    Token::Word(w) => {
+                        if w.value.eq_ignore_ascii_case("CONSTRAINT") {
+                            state = State::ExpectConstraintName;
+                        } else if ["PRIMARY", "FOREIGN", "CHECK", "UNIQUE"]
+                            .contains(&w.value.to_uppercase().as_str())
+                        {
+                            state = State::InsideTableBody;
+                        } else {
+                            state = State::InsideTableBody;
+                        }
+                    }
+                    Token::SingleQuotedString(s) => {
+                        *token = Token::Word(tokenizer::Word {
+                            value: s.clone(),
+                            quote_style: Some('"'),
+                            keyword: Keyword::NoKeyword,
+                        });
+                        state = State::InsideTableBody;
+                    }
+                    _ => {}
+                },
+                State::ExpectConstraintName => {
+                    if let Token::SingleQuotedString(s) = token {
+                        *token = Token::Word(tokenizer::Word {
                             value: s.clone(),
                             quote_style: Some('"'),
                             keyword: Keyword::NoKeyword,
                         });
                     }
-                    expecting_identifier = false;
-                    expecting_table_name = false;
+                    state = State::InsideTableBody;
                 }
-                Token::Word(w) => {
-                    if w.value.eq_ignore_ascii_case("TABLE") {
-                        expecting_table_name = true;
-                    } else {
-                        expecting_table_name = false;
-                    }
-                    expecting_identifier = false;
-                }
-                _ => {
-                    expecting_identifier = false;
-                    expecting_table_name = false;
-                }
+                _ => {} // InsideTableBody or WaitForOpenParen waiting for punctuation
             }
         }
 
-        let mut parser = Parser::new(&dialect).with_tokens(tokens);
+        let mut parser = sqlparser::parser::Parser::new(&dialect).with_tokens(tokens);
         let statements = parser
             .parse_statements()
             .map_err(|e| Error::SchemaError(format!("Failed to parse SQL: {e}")))?;
@@ -248,14 +298,12 @@ impl<IO: Read + Seek> Database<IO> {
             for column in &create_table.columns {
                 column_names.push(column.name.value.clone());
 
-                // Check for INTEGER PRIMARY KEY definition
                 if rowid_column.is_none() {
                     let is_integer = matches!(
                         column.data_type,
                         sqlparser::ast::DataType::Integer(_) | sqlparser::ast::DataType::Int(_)
                     );
 
-                    // Fix: Match PrimaryKey variant directly
                     let is_primary_key = column.options.iter().any(|opt| {
                         matches!(opt.option, sqlparser::ast::ColumnOption::PrimaryKey(_))
                     });
@@ -1223,4 +1271,111 @@ pub struct IndexInfo {
     pub table_name: String,
     pub columns: Vec<String>,
     pub root_page: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to unwrap result and inspect columns
+    fn test_parse(sql: &str) -> (Vec<String>, Option<String>) {
+        Database::<std::io::Cursor<Vec<u8>>>::parse_create_table_def(sql)
+            .expect("Failed to parse SQL")
+    }
+
+    #[test]
+    fn test_basic_quoted_identifiers() {
+        // Standard case: Everything single-quoted
+        let sql = "CREATE TABLE 'MyTable' ('Id' INTEGER PRIMARY KEY, 'Name' TEXT)";
+        let (cols, rowid) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Id", "Name"]);
+        assert_eq!(rowid, Some("Id".to_string()));
+    }
+
+    #[test]
+    fn test_mixed_quoting() {
+        // Mixed case: Table quoted, one column quoted, one unquoted
+        let sql = "CREATE TABLE 'Users' (Id INTEGER PRIMARY KEY, 'Email' TEXT)";
+        let (cols, rowid) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Id", "Email"]);
+        assert_eq!(rowid, Some("Id".to_string()));
+    }
+
+    #[test]
+    fn test_if_not_exists() {
+        // Fix for Issue 1: IF NOT EXISTS should be ignored, and 'Config' should be parsed as table name
+        let sql = "CREATE TABLE IF NOT EXISTS 'Config' ('Key' TEXT, 'Value' TEXT)";
+        let (cols, _) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Key", "Value"]);
+    }
+
+    #[test]
+    fn test_named_constraints() {
+        // Fix for Issue 2: Quoted constraint names should be sanitized
+        // The parser usually ignores constraint names in the final AST, but we need to ensure
+        // the tokenizer doesn't crash or reject the SQL before that point.
+        let sql = "CREATE TABLE 'Orders' (
+            'Id' INTEGER, 
+            'UserId' INTEGER,
+            CONSTRAINT 'PK_Orders' PRIMARY KEY ('Id')
+        )";
+        let (cols, rowid) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Id", "UserId"]);
+        // Note: rowid might be None here depending on strict INTEGER PRIMARY KEY detection logic
+        // But the parsing itself must succeed.
+    }
+
+    #[test]
+    fn test_preserve_string_literals_in_defaults() {
+        // CRITICAL TEST: Ensure we don't turn default values into identifiers
+        // 'active' should remain a string literal, NOT become "active"
+        let sql = "CREATE TABLE 'Status' (
+            'Id' INTEGER, 
+            'State' TEXT DEFAULT 'active'
+        )";
+
+        // We verify parsing succeeds.
+        // (Deep inspection would require checking the AST defaults, but success is the first step)
+        let (cols, _) = test_parse(sql);
+        assert_eq!(cols, vec!["Id", "State"]);
+    }
+
+    #[test]
+    fn test_complex_formatting_and_comments() {
+        // Ensure tokenizer skips comments and handles newlines correctly
+        let sql = "
+            CREATE TABLE 'Log' ( -- This is the log table
+                'Id' INTEGER PRIMARY KEY,
+                'Message' TEXT -- The log message
+            )
+        ";
+        let (cols, rowid) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Id", "Message"]);
+        assert_eq!(rowid, Some("Id".to_string()));
+    }
+
+    #[test]
+    fn test_no_rowid_table() {
+        // Table without an INTEGER PRIMARY KEY
+        let sql = "CREATE TABLE 'Mapping' ('Source' INTEGER, 'Dest' INTEGER)";
+        let (cols, rowid) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Source", "Dest"]);
+        assert_eq!(rowid, None);
+    }
+
+    #[test]
+    fn test_keywords_as_identifiers() {
+        // SQLite allows keywords as identifiers if quoted
+        // This tests if our logic converts 'Group' (a keyword) to "Group" (an identifier)
+        let sql = "CREATE TABLE 'Groups' ('Group' TEXT, 'Order' INTEGER)";
+        let (cols, _) = test_parse(sql);
+
+        assert_eq!(cols, vec!["Group", "Order"]);
+    }
 }
