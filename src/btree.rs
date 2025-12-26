@@ -257,8 +257,7 @@ impl<'a> BTreeCursor<'a> {
                     "Failed to parse leaf cell on page {}: {}",
                     page.page_number, e
                 ));
-                // Skip this cell and continue to next iteration
-                Ok(None)
+                return Err(e);
             }
         }
     }
@@ -473,6 +472,13 @@ where
         }
     };
 
+    if payload_size > max_local as u64 {
+        crate::logging::log_debug(&format!(
+            "Overflow detected! Payload size: {}, Max local: {}, Local size: {}",
+            payload_size, max_local, local_size
+        ));
+    }
+
     // Bounds check for local read
     if offset + local_size > initial_data.len() {
         return Err(Error::InvalidFormat(format!(
@@ -504,6 +510,8 @@ where
             initial_data[offset + 3],
         ]);
 
+        crate::logging::log_debug(&format!("First overflow page pointer: {}", next_page_num));
+
         let mut bytes_read = local_size;
         let overflow_payload_capacity = usable_space - OVERFLOW_PAGE_HEADER_SIZE; // usually 4096 - 4 = 4092
 
@@ -513,6 +521,8 @@ where
                     "Overflow chain terminated early".into(),
                 ));
             }
+
+            crate::logging::log_debug(&format!("Fetching overflow page: {}", next_page_num));
 
             let page = read_page(next_page_num)?;
 

@@ -97,6 +97,8 @@ pub enum PageType {
     LeafIndex = 0x0a,
     /// Leaf table b-tree page
     LeafTable = 0x0d,
+    /// Overflow page (no standard header, inferred by context)
+    Overflow,
 }
 
 impl PageType {

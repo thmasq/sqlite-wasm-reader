@@ -45,22 +45,43 @@ impl Page {
         }
 
         let page_type_byte = data[header_offset];
-        let page_type = PageType::from_byte(page_type_byte)
-            .ok_or_else(|| Error::InvalidFormat(format!("Invalid page type: {page_type_byte}")))?;
 
-        let first_cell_offset = BigEndian::read_u16(&data[header_offset + 1..]);
-        let cell_count = BigEndian::read_u16(&data[header_offset + 3..]);
-        let fragmented_free_bytes = data[header_offset + 7];
+        if !matches!(page_type_byte, 0x02 | 0x05 | 0x0a | 0x0d) {
+            crate::logging::log_warn(&format!(
+                "Suspicious Page Header: Page {}. Byte[0]={:#04x}. First 4 bytes: {:02x?}",
+                page_number,
+                page_type_byte,
+                &data[header_offset..header_offset + 4]
+            ));
+        }
 
-        let right_pointer = if page_type.is_leaf() {
-            None
-        } else {
-            Some(BigEndian::read_u32(&data[header_offset + 8..]))
-        };
+        let page_type = PageType::from_byte(page_type_byte).unwrap_or(PageType::Overflow);
+
+        let (cell_count, first_cell_offset, fragmented_free_bytes, right_pointer) =
+            if page_type == PageType::Overflow {
+                (0, 0, 0, None)
+            } else {
+                let first_cell_offset = BigEndian::read_u16(&data[header_offset + 1..]);
+                let cell_count = BigEndian::read_u16(&data[header_offset + 3..]);
+                let fragmented_free_bytes = data[header_offset + 7];
+
+                let right_pointer = if page_type.is_leaf() {
+                    None
+                } else {
+                    Some(BigEndian::read_u32(&data[header_offset + 8..]))
+                };
+
+                (
+                    cell_count,
+                    first_cell_offset,
+                    fragmented_free_bytes,
+                    right_pointer,
+                )
+            };
 
         Ok(Self {
             page_number,
-            data: data.to_vec(), // Clone only when creating the Page struct
+            data: data.to_vec(),
             page_type,
             cell_count,
             first_cell_offset,
