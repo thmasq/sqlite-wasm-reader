@@ -2,6 +2,9 @@
 
 use byteorder::{BigEndian, ByteOrder};
 use lru::LruCache;
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -168,7 +171,68 @@ impl<IO: Read + Seek> Database<IO> {
     /// Parse a CREATE TABLE statement to extract column names and the INTEGER PRIMARY KEY column.
     fn parse_create_table_def(sql: &str) -> Result<(Vec<String>, Option<String>)> {
         let dialect = sqlparser::dialect::SQLiteDialect {};
-        let statements = sqlparser::parser::Parser::parse_sql(&dialect, sql)
+
+        let mut tokenizer = Tokenizer::new(&dialect, sql);
+        let mut tokens = tokenizer
+            .tokenize()
+            .map_err(|e| Error::SchemaError(format!("Tokenizer error: {e}")))?;
+
+        let mut depth = 0;
+        let mut expecting_identifier = false; // True after '(' or ',' inside table def
+        let mut expecting_table_name = false; // True after 'TABLE'
+
+        for token in &mut tokens {
+            match token {
+                Token::Whitespace(_) => continue,
+
+                Token::LParen => {
+                    depth += 1;
+                    if depth == 1 {
+                        expecting_identifier = true;
+                    }
+                    expecting_table_name = false;
+                }
+                Token::RParen => {
+                    depth -= 1;
+                    expecting_identifier = false;
+                    expecting_table_name = false;
+                }
+                Token::Comma => {
+                    if depth == 1 {
+                        expecting_identifier = true;
+                    }
+                    expecting_table_name = false;
+                }
+                Token::SingleQuotedString(s) => {
+                    if (depth == 1 && expecting_identifier) || (depth == 0 && expecting_table_name)
+                    {
+                        *token = Token::Word(sqlparser::tokenizer::Word {
+                            value: s.clone(),
+                            quote_style: Some('"'),
+                            keyword: Keyword::NoKeyword,
+                        });
+                    }
+                    expecting_identifier = false;
+                    expecting_table_name = false;
+                }
+                Token::Word(w) => {
+                    if w.value.eq_ignore_ascii_case("TABLE") {
+                        expecting_table_name = true;
+                    } else {
+                        expecting_table_name = false;
+                    }
+                    expecting_identifier = false;
+                }
+                _ => {
+                    expecting_identifier = false;
+                    expecting_table_name = false;
+                }
+            }
+        }
+
+        let mut parser = Parser::new(&dialect).with_tokens(tokens);
+        let statements = parser
+            .parse_statements()
             .map_err(|e| Error::SchemaError(format!("Failed to parse SQL: {e}")))?;
 
         if statements.len() != 1 {
@@ -213,7 +277,7 @@ impl<IO: Read + Seek> Database<IO> {
     /// using sqlparser instead of manual string matching.
     fn parse_create_index_info(sql: &str) -> Result<(String, Vec<String>)> {
         let dialect = sqlparser::dialect::SQLiteDialect {};
-        let statements = sqlparser::parser::Parser::parse_sql(&dialect, sql)
+        let statements = Parser::parse_sql(&dialect, sql)
             .map_err(|e| Error::SchemaError(format!("Failed to parse SQL: {e}")))?;
 
         if let Some(sqlparser::ast::Statement::CreateIndex(index_info)) = statements.first() {
