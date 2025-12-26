@@ -1,11 +1,10 @@
 [package]
 name = "sqlite_wasm_reader"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
-authors = ["Ramanan Ravikumar <ramanan@deepfence.io>"]
+authors = ["Thomas Q <thomasqsa@gmail.com>", "Ramanan Ravikumar <ramanan@deepfence.io>"]
 description = "A pure Rust SQLite reader library for WASI environments"
-documentation = "https://docs.rs/sqlite_wasm_reader"
-repository = "https://github.com/execve-ai/sqlite-wasm-reader"
+repository = "https://github.com/thmasq/sqlite-wasm-reader"
 license = "Apache-2.0"
 keywords = ["sqlite", "wasm", "wasi", "database", "reader"]
 categories = ["database", "wasm", "parser-implementations"]
