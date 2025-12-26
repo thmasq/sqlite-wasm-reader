@@ -116,25 +116,22 @@ impl<IO: Read + Seek> Database<IO> {
         // First pass: process tables
         for (name, object) in &schema_objects {
             if object.type_name == "table" && !name.starts_with("sqlite_") {
-                // Try strict parsing first, then fallback to simple text parsing
-                let columns = match Self::parse_create_table_columns(&object.sql) {
-                    Ok(cols) => cols,
+                match Self::parse_create_table_def(&object.sql) {
+                    Ok((columns, rowid_column)) => {
+                        let table_info = TableInfo {
+                            name: name.clone(),
+                            root_page: object.root_page,
+                            columns,
+                            indexes: Vec::new(),
+                            sql: object.sql.clone(),
+                            rowid_column,
+                        };
+                        tables.insert(name.clone(), table_info);
+                    }
                     Err(e) => {
-                        log_warn(&format!(
-                            "Strict SQL parse failed for '{name}': {e}. Trying fallback parser."
-                        ));
-                        Self::fallback_parse_columns(&object.sql)
+                        log_warn(&format!("Skipping table '{name}' due to invalid SQL: {e}"));
                     }
                 };
-
-                let table_info = TableInfo {
-                    name: name.clone(),
-                    root_page: object.root_page,
-                    columns,
-                    indexes: Vec::new(),
-                    sql: object.sql.clone(),
-                };
-                tables.insert(name.clone(), table_info);
             }
         }
 
@@ -168,8 +165,8 @@ impl<IO: Read + Seek> Database<IO> {
         Ok(())
     }
 
-    /// Parse a CREATE TABLE statement to extract column names
-    fn parse_create_table_columns(sql: &str) -> Result<Vec<String>> {
+    /// Parse a CREATE TABLE statement to extract column names and the INTEGER PRIMARY KEY column.
+    fn parse_create_table_def(sql: &str) -> Result<(Vec<String>, Option<String>)> {
         let dialect = sqlparser::dialect::SQLiteDialect {};
         let statements = sqlparser::parser::Parser::parse_sql(&dialect, sql)
             .map_err(|e| Error::SchemaError(format!("Failed to parse SQL: {e}")))?;
@@ -180,14 +177,31 @@ impl<IO: Read + Seek> Database<IO> {
             ));
         }
 
-        if let sqlparser::ast::Statement::CreateTable(sqlparser::ast::CreateTable {
-            name: _,
-            columns,
-            ..
-        }) = &statements[0]
-        {
-            let column_names = columns.iter().map(|col| col.name.value.clone()).collect();
-            Ok(column_names)
+        if let Some(sqlparser::ast::Statement::CreateTable(create_table)) = statements.first() {
+            let mut column_names = Vec::new();
+            let mut rowid_column = None;
+
+            for column in &create_table.columns {
+                column_names.push(column.name.value.clone());
+
+                // Check for INTEGER PRIMARY KEY definition
+                if rowid_column.is_none() {
+                    let is_integer = matches!(
+                        column.data_type,
+                        sqlparser::ast::DataType::Integer(_) | sqlparser::ast::DataType::Int(_)
+                    );
+
+                    // Fix: Match PrimaryKey variant directly
+                    let is_primary_key = column.options.iter().any(|opt| {
+                        matches!(opt.option, sqlparser::ast::ColumnOption::PrimaryKey(_))
+                    });
+
+                    if is_integer && is_primary_key {
+                        rowid_column = Some(column.name.value.clone());
+                    }
+                }
+            }
+            Ok((column_names, rowid_column))
         } else {
             Err(Error::SchemaError(
                 "Expected a CREATE TABLE statement".into(),
@@ -195,105 +209,54 @@ impl<IO: Read + Seek> Database<IO> {
         }
     }
 
-    /// Fallback parser for when sqlparser fails (e.g. non-standard quoting or types)
-    fn fallback_parse_columns(sql: &str) -> Vec<String> {
-        let mut columns = Vec::new();
-        // Find content inside the first pair of parentheses
-        if let (Some(start), Some(end)) = (sql.find('('), sql.rfind(')'))
-            && start < end
-        {
-            let content = &sql[start + 1..end];
-            // Naive split by comma (doesn't handle commas inside definitions, but works for simple schemas)
-            for segment in content.split(',') {
-                let segment = segment.trim();
-                if segment.is_empty() {
-                    continue;
-                }
-
-                // The first word is usually the column name
-                if let Some(first_word) = segment.split_whitespace().next() {
-                    // Strip quotes: "Id", 'Id', [Id], `Id`
-                    let cleaned = first_word.trim_matches(|c| {
-                        c == '"' || c == '\'' || c == '`' || c == '[' || c == ']'
-                    });
-                    columns.push(cleaned.to_string());
-                }
-            }
-        }
-        // If fallback failed completely, return a default column to allow raw access
-        if columns.is_empty() {
-            columns.push("unknown_col".to_string());
-        }
-        columns
-    }
-
     /// Parse a CREATE INDEX statement to extract the target table and column names
-    /// This routine uses simple string parsing instead of relying on the full SQL parser
-    /// because sqlparser's `CreateIndex` support is experimental and may break between versions.
-    /// It supports statements of the following forms (case-insensitive):
-    ///     CREATE [UNIQUE] INDEX `idx_name` ON `table_name(col1`, col2, ...);
-    ///     CREATE INDEX IF NOT EXISTS `idx_name` ON "table" ( `col1` , `col2` );
-    /// It returns the referenced table name and the list of column names in the order they
-    /// appear in the index definition.
+    /// using sqlparser instead of manual string matching.
     fn parse_create_index_info(sql: &str) -> Result<(String, Vec<String>)> {
-        // To keep things reasonably robust without pulling in a full SQL parser, we
-        // locate the first " ON " keyword (case-insensitive) and then extract the
-        // substring up to the first opening parenthesis. Everything between ON and
-        // the parenthesis is considered the table name (it may include a schema
-        // prefix, e.g. "main.table").
-        let lowercase = sql.to_lowercase();
-        let on_pos = lowercase
-            .find(" on ")
-            .ok_or_else(|| Error::SchemaError("CREATE INDEX statement missing 'ON'".into()))?;
+        let dialect = sqlparser::dialect::SQLiteDialect {};
+        let statements = sqlparser::parser::Parser::parse_sql(&dialect, sql)
+            .map_err(|e| Error::SchemaError(format!("Failed to parse SQL: {e}")))?;
 
-        // Slice AFTER the " on " (preserve original casing for table name parsing)
-        let after_on = &sql[on_pos + 4..];
-        let after_on_trim = after_on.trim_start();
+        if let Some(sqlparser::ast::Statement::CreateIndex(index_info)) = statements.first() {
+            // 1. Extract the table name
+            // index_info.table_name is an ObjectName, which wraps Vec<ObjectNamePart>
+            let table = index_info
+                .table_name
+                .0
+                .iter()
+                .map(|part| match part {
+                    // Extract value from Identifier variant
+                    sqlparser::ast::ObjectNamePart::Identifier(ident) => ident.value.clone(),
+                    // Fallback for other variants (e.g. Function)
+                    _ => part.to_string(),
+                })
+                .collect::<Vec<String>>()
+                .join(".");
 
-        // Parse table name (stop at whitespace or '(' )
-        let mut table_name = String::new();
-        for ch in after_on_trim.chars() {
-            if ch.is_whitespace() || ch == '(' {
-                break;
+            // 2. Extract column names from the index definition
+            let mut parsed_columns = Vec::new();
+            for col in &index_info.columns {
+                // Fix: Access expression via `col.column.expr`
+                if let sqlparser::ast::Expr::Identifier(ident) = &col.column.expr {
+                    parsed_columns.push(ident.value.clone());
+                } else {
+                    log_warn(&format!(
+                        "Skipping complex expression in index for table '{table}'"
+                    ));
+                }
             }
-            table_name.push(ch);
+
+            if parsed_columns.is_empty() {
+                return Err(Error::SchemaError(
+                    "CREATE INDEX has no valid columns".into(),
+                ));
+            }
+
+            Ok((table, parsed_columns))
+        } else {
+            Err(Error::SchemaError(
+                "Expected a CREATE INDEX statement".into(),
+            ))
         }
-
-        // Clean table name quotes
-        let table_name = table_name
-            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
-            .to_string();
-
-        if table_name.is_empty() {
-            return Err(Error::SchemaError(
-                "Unable to parse table name from CREATE INDEX".into(),
-            ));
-        }
-
-        // Locate the first '(' which starts the column list
-        let paren_start = after_on_trim
-            .find('(')
-            .ok_or_else(|| Error::SchemaError("CREATE INDEX missing column list".into()))?;
-        let paren_end_rel = after_on_trim[paren_start + 1..]
-            .find(')')
-            .ok_or_else(|| Error::SchemaError("CREATE INDEX missing closing ')'".into()))?;
-        let paren_end = paren_start + 1 + paren_end_rel;
-        let cols_segment = &after_on_trim[paren_start + 1..paren_end];
-
-        let columns: Vec<String> = cols_segment
-            .split(',')
-            .map(|s| {
-                s.trim()
-                    .trim_matches(|c| c == '`' || c == '"' || c == '\'')
-                    .to_string()
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if columns.is_empty() {
-            return Err(Error::SchemaError("CREATE INDEX has no columns".into()));
-        }
-        Ok((table_name, columns))
     }
 
     /// Parse the file header
@@ -774,34 +737,7 @@ impl<IO: Read + Seek> Database<IO> {
             .get(table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
 
-        // Parse the CREATE TABLE statement to find INTEGER PRIMARY KEY
-        let sql = &table_info.sql;
-
-        // Simple pattern matching for INTEGER PRIMARY KEY
-        // This is a simplified approach - in a full implementation, we'd use a proper SQL parser
-        // This is a basic implementation that handles common cases
-        let sql_lower = sql.to_lowercase();
-
-        // Look for patterns like "columnname integer primary key"
-        for line in sql_lower.lines() {
-            let line = line.trim();
-            if line.contains("integer") && line.contains("primary") && line.contains("key") {
-                // Extract column name - look for the first word before "integer"
-                let words: Vec<&str> = line.split_whitespace().collect();
-                for i in 0..words.len() {
-                    if words[i] == "integer" && i > 0 {
-                        let column_name = words[i - 1]
-                            .trim_matches(',')
-                            .trim_matches('(')
-                            .trim_matches('"')
-                            .trim_matches('`');
-                        return Ok(Some(column_name.to_string()));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
+        Ok(table_info.rowid_column.clone())
     }
 
     /// Execute a SELECT SQL query with index acceleration and table scan fallback
@@ -1213,6 +1149,7 @@ pub struct TableInfo {
     pub indexes: Vec<IndexInfo>,
     pub root_page: u32,
     pub sql: String,
+    pub rowid_column: Option<String>,
 }
 
 /// Index schema information
