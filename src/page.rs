@@ -46,15 +46,6 @@ impl Page {
 
         let page_type_byte = data[header_offset];
 
-        if !matches!(page_type_byte, 0x02 | 0x05 | 0x0a | 0x0d) {
-            crate::logging::log_warn(&format!(
-                "Suspicious Page Header: Page {}. Byte[0]={:#04x}. First 4 bytes: {:02x?}",
-                page_number,
-                page_type_byte,
-                &data[header_offset..header_offset + 4]
-            ));
-        }
-
         let page_type = PageType::from_byte(page_type_byte).unwrap_or(PageType::Overflow);
 
         let (cell_count, first_cell_offset, fragmented_free_bytes, right_pointer) =
