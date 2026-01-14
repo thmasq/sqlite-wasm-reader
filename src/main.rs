@@ -29,6 +29,10 @@ fn main() -> Result<(), Error> {
     }
 
     for table_name in tables {
+        if table_name != "ScenarioScriptDBSchema" {
+            continue;
+        }
+
         println!("\n------------------------------------------------");
         println!("Table: {table_name}");
 
@@ -73,6 +77,10 @@ fn format_value(value: &Value) -> String {
         Value::Integer(i) => i.to_string(),
         Value::Real(f) => f.to_string(),
         Value::Text(s) => format!("\"{s}\""),
-        Value::Blob(b) => format!("<BLOB {} bytes>", b.len()),
+        // 2. FORMAT: Convert the blob bytes to a Hex string
+        Value::Blob(b) => {
+            let hex_string: String = b.iter().map(|byte| format!("{byte:02X}")).collect();
+            format!("<BLOB {} bytes>: 0x{}", b.len(), hex_string)
+        }
     }
 }
