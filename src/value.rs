@@ -166,6 +166,66 @@ impl Ord for Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(val: bool) -> Self {
+        // SQLite uses integers 0 and 1 for booleans
+        Value::Integer(if val { 1 } else { 0 })
+    }
+}
+
+impl From<i64> for Value {
+    fn from(val: i64) -> Self {
+        Value::Integer(val)
+    }
+}
+
+// Convenience for i32, common in many APIs
+impl From<i32> for Value {
+    fn from(val: i32) -> Self {
+        Value::Integer(val as i64)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(val: f64) -> Self {
+        Value::Real(val)
+    }
+}
+
+impl From<String> for Value {
+    fn from(val: String) -> Self {
+        Value::Text(val)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(val: &str) -> Self {
+        Value::Text(val.into())
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(val: Vec<u8>) -> Self {
+        Value::Blob(val)
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(val: &[u8]) -> Self {
+        Value::Blob(val.into())
+    }
+}
+
+// Handles Option::None -> Value::Null automatically
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(val: Option<T>) -> Self {
+        match val {
+            Some(v) => v.into(),
+            None => Value::Null,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
